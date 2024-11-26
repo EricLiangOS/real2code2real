@@ -1,0 +1,29 @@
+name: real2code2real
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - ffmpeg=4.2.2
+  - pillow=10.2.0
+  - pip=23.3.1
+  - python=3.10.11
+  - pytorch=2.3.1
+  - torchaudio=2.3.1
+  - torchvision=0.18.1
+  - typing_extensions=4.9.0
+  - pytorch-cuda=11.8
+  - pip:
+    - open3d==0.18.0
+    - mediapy==1.1.2
+    - lpips==0.1.4
+    - scikit-image==0.21.0
+    - tqdm==4.66.2
+    - trimesh==4.5.2
+    - mesh_extraction/submodules/diff-surfel-rasterization
+    - mesh_extraction/submodules/simple-knn
+    - plyfile
+    - opencv-python
+    - open3d
+    - mediapy
