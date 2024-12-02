@@ -35,7 +35,7 @@ def render_mesh(args, mesh_name):
     gaussExtractor.gaussians.active_sh_degree = 0
     gaussExtractor.reconstruction(scene.getTrainCameras())
     # extract the mesh and save
-    name = f'un_processed_{mesh_name}.ply'
+    name = f'unprocessed_{mesh_name}.ply'
     depth_trunc = (gaussExtractor.radius * 2.0) if args.depth_trunc < 0  else args.depth_trunc
     voxel_size = (depth_trunc / args.mesh_res) if args.voxel_size < 0 else args.voxel_size
     sdf_trunc = 5.0 * voxel_size if args.sdf_trunc < 0 else args.sdf_trunc

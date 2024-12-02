@@ -136,6 +136,7 @@ for obj in range(num_objects):
     if (not args.skip_training):
         os.makedirs(args.model_path, exist_ok=True)
         print(bcolors.OKCYAN + f"Training 2DGS for {obj + 1}" + bcolors.ENDC)   
+
         try:
             training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint)
             print(bcolors.OKGREEN + f"2DGS successfully trained for object {obj + 1} at {args.model_path}" + bcolors.ENDC)

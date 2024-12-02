@@ -233,18 +233,11 @@ def get_object_masks(object_dir, prompts, background_dir = ""):
             image = np.array(Image.open(f"{object_input_dir}/{index}.jpg"))
             masked_image = np.where(mask[..., None], image, 0)  # Add channel dimension for broadcasting
 
-            save_masked_image_as_rgba(masked_image, mask, f"{object_output_dir}/{index}.png")
-
-            # if background_dir:
-            #     background_mask = video_segments[index][-1][0][0]
-            #     background_masked_image = np.where(background_mask[..., None], image, 0)  # Add channel dimension for broadcasting
-
-            #     save_masked_image_as_rgba(background_masked_image, background_mask, f"{background_dir}/{index}.png")                
+            save_masked_image_as_rgba(masked_image, mask, f"{object_output_dir}/{index}.png")            
 
     create_video(object_dir)
 
     print(f"Masks saved to {object_output_dir}")
 
     unstandardize_names(object_output_dir, frame_names, ".png")
-    unstandardize_names(background_dir, frame_names, ".png")
     unstandardize_names(object_input_dir, frame_names, ".jpg")
