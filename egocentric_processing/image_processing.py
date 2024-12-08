@@ -123,7 +123,6 @@ if __name__ == "__main__":
     vrs_dir = args.source_path
     output_dir = os.path.join(os.path.dirname(vrs_dir), "input")
 
-
     get_images(vrs_dir, output_dir, args.dataset_size)
     convert_files(os.path.dirname(vrs_dir))
 
