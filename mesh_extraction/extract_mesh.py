@@ -54,7 +54,7 @@ background_masks_dir = os.path.join(base_dir, "images")
 # Reduce the dataset size
 if not os.path.isdir(input_dir):
     print(bcolors.OKCYAN + f"Making reduced dataset directory at {input_dir}" + bcolors.ENDC)
-    copy_dataset(raw_dir, input_dir, len(os.listdir(raw_dir))//args.dataset_size)
+    copy_dataset(raw_dir, input_dir, args.dataset_size)
 print(bcolors.OKGREEN + f"Reduced dataset successfully created at {input_dir}" + bcolors.ENDC)
 
 # Get labeled images for precision prompting
@@ -69,9 +69,12 @@ frame_intervals = []
 # Get information for each object in order  
 num_objects = int(input("Enter desired number of objects: "))
 for obj in range(num_objects):
+    frames = input(f"For the reconstruction interval of object {obj + 1}, enter its first and last frame of appearance").split(" ")
+    start_frame, end_frame = int(frames[0]), int(frames[1])
+
     user_input = input(f"For part of object {obj + 1}, enter the its first frame appearance, the type of prompt, and coordinates: ").split(" ")
     object_prompts = []
-    frame_intervals.append(int(user_input[0]))
+    frame_intervals.append([start_frame, end_frame])
     while len(user_input) > 1:
         starting_index = int(user_input[0])
         prompts = [int(user_input[1])]
@@ -79,20 +82,11 @@ for obj in range(num_objects):
         for i in range(1, len(user_input)//2):
             prompts.append([int(user_input[2 * i]), int(user_input[2 * i + 1])])
         
-        object_prompts.append((starting_index - frame_intervals[obj], prompts))
+        object_prompts.append((starting_index - frame_intervals[obj][0], prompts))
 
         user_input = input(f"For part of object {obj + 1}, enter the its first frame appearance, the type of prompt, and coordinates. Press return once done: ").split(" ")
 
     all_object_prompts[obj] = object_prompts
-
-frame_intervals.append(len(os.listdir(input_dir)))
-
-# Get colmap for the base directory
-if not os.path.isdir(os.path.join(base_dir, "distorted")):
-    print(bcolors.OKCYAN + "Getting COLMAP for entire scene" + bcolors.ENDC)
-    convert_files(base_dir)
-    
-print(bcolors.OKGREEN + "COLMAP successfully retrieved" + bcolors.ENDC)
 
 # Create new directory and calculate masks for each object
 for obj in range(num_objects):
@@ -106,14 +100,19 @@ for obj in range(num_objects):
         print(bcolors.OKCYAN + f"Making copies of input in object directory for object {obj + 1}"+ bcolors.ENDC)
         os.makedirs(object_input_dir, exist_ok=True)
         
-        # Move existing files to a separate directory
-        for file_index in range(frame_intervals[obj], frame_intervals[obj + 1]):
+        # Copy existing files to a separate directory
+        for file_index in range(frame_intervals[obj][0], frame_intervals[obj][1]):
             file_path = os.path.join(input_dir, f"{file_index}.jpg")
             if os.path.isfile(file_path):
                 shutil.copy2(file_path, object_input_dir)
     else:
         print(bcolors.OKGREEN + f"Object input directory already found for object {obj + 1}" + bcolors.ENDC)
     
+    # Create local colmap for this object
+    if not os.path.isdir(os.path.join(object_dir, "colmap")):
+        print(bcolors.OKCYAN + "Getting COLMAP for object " + str(obj + 1) + bcolors.ENDC)
+        convert_files(object_dir)
+
     # Get masks for the object directory and its background
     if not os.path.isdir(os.path.join(object_dir, "images")):
         print(bcolors.OKCYAN + f"Getting masks for object {obj + 1}" + bcolors.ENDC)
@@ -123,9 +122,7 @@ for obj in range(num_objects):
     else:
         print(bcolors.OKGREEN + f"Masks directory already found for object {obj + 1}" + bcolors.ENDC)
         
-    # Move colmap info to new directories
-    if not os.path.isdir(os.path.join(object_dir, "sparse")): 
-        shutil.copytree(os.path.join(base_dir, "sparse"), os.path.join(object_dir, "sparse"))
+    print(bcolors.OKGREEN + "COLMAP successfully for object " + str(obj + 1) + bcolors.ENDC)
 
     # Train 2d gaussians for each part of the object
     args.source_path = object_dir
@@ -135,13 +132,13 @@ for obj in range(num_objects):
     
     if (not args.skip_training):
         os.makedirs(args.model_path, exist_ok=True)
-        print(bcolors.OKCYAN + f"Training 2DGS for {obj + 1}" + bcolors.ENDC)   
+        print(bcolors.OKCYAN + f"Training 2DGS for object {obj + 1}" + bcolors.ENDC)   
 
         try:
             training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint)
             print(bcolors.OKGREEN + f"2DGS successfully trained for object {obj + 1} at {args.model_path}" + bcolors.ENDC)
-        except:
-            print(bcolors.FAIL + "Error training" + bcolors.ENDC)
+        except Exception as e:
+            print(bcolors.FAIL + "Error training: " + e + bcolors.ENDC)
 
         if (not args.skip_rendering):
             # Get the mesh
@@ -149,8 +146,8 @@ for obj in range(num_objects):
             try:
                 render_mesh(args, f"object_{obj + 1}")
                 print(bcolors.OKGREEN + f"Mesh successfully extracted for object {obj + 1} at {args.model_path}" + bcolors.ENDC)
-            except:
-                print(bcolors.FAIL + "Error extracting mesh" + bcolors.ENDC)
+            except Exception as e:
+                print(bcolors.FAIL + "Error extracting mesh" + e + bcolors.ENDC)
 
 
 

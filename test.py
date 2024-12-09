@@ -67,7 +67,9 @@ def rename_images(input_directory):
         os.rename(old_path, new_path)
         print(f"Renamed: {file} -> {new_name}")
 
-dataset = "/store/real/ehliang/data/test_2/rgb"
-output = "/store/real/ehliang/data/test_2/desk/cam01"
-copy_dataset(dataset, output, 5)
-rename_images(output)
+# dataset = "/store/real/ehliang/data/test_2/rgb"
+# output = "/store/real/ehliang/data/test_2/desk/cam01"
+# copy_dataset(dataset, output, 5)
+# rename_images(output)
+
+remove_jpegs("/store/real/ehliang/data/new_kitchen_2/object_1/images")

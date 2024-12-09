@@ -8,11 +8,13 @@ def convert_files(source_path, resize = False, camera = "OPENCV", colmap_executa
     colmap_command = '"{}"'.format(colmap_executable) if len(colmap_executable) > 0 else "colmap"
     magick_command = '"{}"'.format(magick_executable) if len(magick_executable) > 0 else "magick"
 
-    os.makedirs(source_path + "/distorted/sparse", exist_ok=True)
+    colmap_path = source_path + "/colmap"
 
+    os.makedirs(colmap_pathm exist_ok=True)
+    os.makedirs(colmap_path + "/distorted/sparse", exist_ok=True)
     ## Feature extraction
     feat_extracton_cmd = colmap_command + " feature_extractor "\
-        "--database_path " + source_path + "/distorted/database.db \
+        "--database_path " + colmap_path + "/distorted/database.db \
         --image_path " + source_path + "/input \
         --ImageReader.single_camera 1 \
         --ImageReader.camera_model " + camera + " \
@@ -24,7 +26,7 @@ def convert_files(source_path, resize = False, camera = "OPENCV", colmap_executa
 
     ## Feature matching
     feat_matching_cmd = colmap_command + " exhaustive_matcher \
-        --database_path " + source_path + "/distorted/database.db \
+        --database_path " + colmap_path + "/distorted/database.db \
         --SiftMatching.use_gpu " + str(use_gpu)
     exit_code = os.system(feat_matching_cmd)
     if exit_code != 0:
@@ -35,9 +37,9 @@ def convert_files(source_path, resize = False, camera = "OPENCV", colmap_executa
     # The default Mapper tolerance is unnecessarily large,
     # decreasing it speeds up bundle adjustment steps.
     mapper_cmd = (colmap_command + " mapper \
-        --database_path " + source_path + "/distorted/database.db \
+        --database_path " + colmap_path + "/distorted/database.db \
         --image_path "  + source_path + "/input \
-        --output_path "  + source_path + "/distorted/sparse \
+        --output_path "  + colmap_path + "/distorted/sparse \
         --Mapper.ba_global_function_tolerance=0.000001")
     exit_code = os.system(mapper_cmd)
     if exit_code != 0:
@@ -48,27 +50,27 @@ def convert_files(source_path, resize = False, camera = "OPENCV", colmap_executa
     ## We need to undistort our images into ideal pinhole intrinsics.
     img_undist_cmd = (colmap_command + " image_undistorter \
         --image_path " + source_path + "/input \
-        --input_path " + source_path + "/distorted/sparse/0 \
-        --output_path " + source_path + "\
+        --input_path " + colmap_path + "/distorted/sparse/0 \
+        --output_path " + colmap_path  + "\
         --output_type COLMAP")
     exit_code = os.system(img_undist_cmd)
     if exit_code != 0:
         logging.error(f"Mapper failed with code {exit_code}. Exiting.")
         exit(exit_code)
 
-    files = os.listdir(source_path + "/sparse")
+    files = os.listdir(colmap_path + "/sparse")
     os.makedirs(source_path + "/sparse/0", exist_ok=True)
     # Copy each file from the source directory to the destination directory
     for file in files:
         if file == '0':
             continue
-        source_file = os.path.join(source_path, "sparse", file)
+        source_file = os.path.join(colmap_path, "sparse", file)
         destination_file = os.path.join(source_path, "sparse", "0", file)
         shutil.move(source_file, destination_file)
 
     print("Done.")
 
-def copy_dataset(input_directory, output_directory, save_frequency):
+def copy_dataset(input_directory, output_directory, dataset_size):
     # Create the output directory if it doesn't exist
     os.makedirs(output_directory, exist_ok=True)
 
@@ -82,17 +84,15 @@ def copy_dataset(input_directory, output_directory, save_frequency):
 
     # Copy and rename every nth image to the output directory
     renamed_counter = 0
-    for index, file in enumerate(frame_names):
-        if index % save_frequency == 0:
-            src_path = os.path.join(input_directory, file)
-            dst_path = os.path.join(output_directory, f"{renamed_counter}.jpg")
-            
-            # Open the image and save it without loss
-            img = Image.open(src_path)
-            img.save(dst_path, quality=100)  # High-quality, lossless save
-            renamed_counter += 1
+    save_frequency = len(os.listdir(input_directory)) * 1.0/dataset_size
+    for index in range(dataset_size):
+        src_path = os.path.join(input_directory, frame_names[int(index * save_frequency)])
+        dst_path = os.path.join(output_directory, f"{index}.jpg")
 
-    print(f"Made a copy and saved every {save_frequency}th image to '{output_directory}' with lossless quality.")
+        if os.path.isfile(src_path):
+            shutil.copy2(src_path, dst_path)
+
+    print(f"Made a copy of {dataset_size} files to '{output_directory}' with lossless quality.")
 
 def remove_jpegs(input_directory):
     # Get a list of all files in the directory
