@@ -19,6 +19,7 @@ from functools import partial
 import open3d as o3d
 import trimesh
 
+
 def post_process_mesh(mesh, cluster_to_keep=1000):
     """
     Post-process a mesh to filter out floaters and disconnected parts
@@ -220,7 +221,6 @@ class GaussianExtractor(object):
         def contract(x):
             mag = torch.linalg.norm(x, ord=2, dim=-1)[..., None]
             return torch.where(mag < 1, x, (2 - (1 / mag)) * (x / mag))
-        
         def uncontract(y):
             mag = torch.linalg.norm(y, ord=2, dim=-1)[..., None]
             return torch.where(mag < 1, y, (1 / (2-mag) * (y/mag)))

@@ -1,32 +1,65 @@
 import os
-import shutil
+# os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
+os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default is 'auto'.
+                                            # 'auto' is faster but will do benchmarking at the beginning.
+                                            # Recommended to set to 'native' if run only once.
+
 from argparse import ArgumentParser
-from utils.mask_utils import get_labeled_images, get_object_masks
-from utils.dataset_utils import copy_dataset,  convert_files
-from render import render_mesh
-from arguments import ModelParams, PipelineParams, OptimizationParams
-from train import training
-import time
-
-parser = ArgumentParser("Get masks and mesh extracts of objects within a scene")
-lp = ModelParams(parser)
-op = OptimizationParams(parser)
-pp = PipelineParams(parser)
-parser.add_argument("--dataset_size", default = 1500, required = True, type = int)
-
-# Mesh arguments
-parser.add_argument("--iteration", default=-1, type=int)
-parser.add_argument("--voxel_size", default=-1.0, type=float, help='Mesh: voxel size for TSDF')
-parser.add_argument("--depth_trunc", default=-1.0, type=float, help='Mesh: Max depth range for TSDF')
-parser.add_argument("--sdf_trunc", default=-1.0, type=float, help='Mesh: truncation value for TSDF')
-parser.add_argument("--mesh_res", default=1024, type=int, help='Mesh: resolution for unbounded mesh extraction')
-
-
-args = parser.parse_args()
-# if args.model_path:
-#     args.model_path = os.path.join(args.model_path, "%Y%m%d-%H%M%S")
-
-render_mesh(args)
+import imageio
+from PIL import Image
+from trellis.pipelines import TrellisImageTo3DPipeline
+from trellis.utils import render_utils, postprocessing_utils
 
 
 
+if __name__ == "__main__":
+    
+    # This Python script is based on the shell converter script provided in the MipNerF 360 repository.
+    parser = ArgumentParser("TRELLIS Object Generation")
+    parser.add_argument("--source_path", "-s", required=True, type=str)
+    parser.add_argument("--output_path", "-o", required=True, type=str)
+    args = parser.parse_args()
+
+    # Load a pipeline from a model folder or a Hugging Face model hub.
+    pipeline = TrellisImageTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-large")
+    pipeline.cuda()
+
+    # Load an image
+    image = Image.open(args.source_path)
+
+    # Run the pipeline
+    outputs = pipeline.run(
+        image,
+        # Optional parameters
+        seed=1,
+        # sparse_structure_sampler_params={
+        #     "steps": 12,
+        #     "cfg_strength": 7.5,
+        # },
+        # slat_sampler_params={
+        #     "steps": 12,
+        #     "cfg_strength": 3,
+        # },
+    )
+    # outputs is a dictionary containing generated 3D assets in different formats:
+    # - outputs['gaussian']: a list of 3D Gaussians
+    # - outputs['radiance_field']: a list of radiance fields
+    # - outputs['mesh']: a list of meshes
+
+    # Render the outputs
+    video = render_utils.render_video(outputs['gaussian'][0])['color']
+    # imageio.mimsave("sample_gs.mp4", video, fps=30)
+    # video = render_utils.render_video(outputs['radiance_field'][0])['color']
+    # imageio.mimsave("sample_rf.mp4", video, fps=30)
+    video = render_utils.render_video(outputs['mesh'][0])['normal']
+    imageio.mimsave("sample_mesh.mp4", video, fps=30)
+
+    # GLB files can be extracted from the outputs
+    glb = postprocessing_utils.to_glb(
+        outputs['gaussian'][0],
+        outputs['mesh'][0],
+        # Optional parameters
+        simplify=0.1,          # Ratio of triangles to remove in the simplification process
+        texture_size=1024,      # Size of the texture used for the GLB
+    )
+    glb.export(args.output_path)

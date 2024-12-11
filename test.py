@@ -2,7 +2,8 @@
 import os, shutil
 from PIL import Image
 
-def copy_dataset(input_directory, output_directory, save_frequency):
+
+def copy_dataset(input_directory, output_directory, dataset_size):
     # Create the output directory if it doesn't exist
     os.makedirs(output_directory, exist_ok=True)
 
@@ -10,23 +11,22 @@ def copy_dataset(input_directory, output_directory, save_frequency):
     # Get all image files in the folder
     frame_names = [
         p for p in os.listdir(input_directory)
-        if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
+        if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG", ".png"]
     ]
     frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
 
     # Copy and rename every nth image to the output directory
-    renamed_counter = 0
-    for index, file in enumerate(frame_names):
-        if index % save_frequency == 0:
-            src_path = os.path.join(input_directory, file)
-            dst_path = os.path.join(output_directory, f"{renamed_counter}.jpg")
-            
-            # Open the image and save it without loss
-            img = Image.open(src_path)
-            img.save(dst_path, quality=100)  # High-quality, lossless save
-            renamed_counter += 1
+    save_frequency = len(os.listdir(input_directory)) * 1.0/dataset_size
+    for index in range(dataset_size):
+        src_path = os.path.join(input_directory, frame_names[int(index * save_frequency)])
+        dst_path = os.path.join(output_directory, f"{index}.jpg")
 
-    print(f"Made a copy and saved every {save_frequency}th image to '{output_directory}' with lossless quality.")
+        if os.path.isfile(src_path):
+            shutil.copy2(src_path, dst_path)
+
+    print(f"Made a copy of {dataset_size} files to '{output_directory}' with lossless quality.")
+
+
 
 
 def remove_jpegs(input_directory):
@@ -72,4 +72,6 @@ def rename_images(input_directory):
 # copy_dataset(dataset, output, 5)
 # rename_images(output)
 
-remove_jpegs("/store/real/ehliang/data/new_kitchen_2/object_1/images")
+copy_dataset("/store/real/ehliang/data/new_kitchen_3/object_1/images", "/store/real/ehliang/data/sample/object_1", 30)
+copy_dataset("/store/real/ehliang/data/new_kitchen_3/object_2/images", "/store/real/ehliang/data/sample/object_2", 30)
+copy_dataset("/store/real/ehliang/data/new_kitchen_3/object_3/images", "/store/real/ehliang/data/sample/object_3", 30)

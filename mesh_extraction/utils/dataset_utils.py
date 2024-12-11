@@ -10,7 +10,7 @@ def convert_files(source_path, resize = False, camera = "OPENCV", colmap_executa
 
     colmap_path = source_path + "/colmap"
 
-    os.makedirs(colmap_pathm exist_ok=True)
+    os.makedirs(colmap_path, exist_ok=True)
     os.makedirs(colmap_path + "/distorted/sparse", exist_ok=True)
     ## Feature extraction
     feat_extracton_cmd = colmap_command + " feature_extractor "\
