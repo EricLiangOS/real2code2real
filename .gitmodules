@@ -1,0 +1,9 @@
+[submodule "TRELLIS"]
+	path = submodules/TRELLIS
+	url = git@github.com:microsoft/TRELLIS.git
+[submodule "sam2"]
+	path = submodules/sam2
+	url = git@github.com:facebookresearch/sam2.git
+[submodule "projectaria_tools"]
+	path = projectaria_tools
+	url = git@github.com:facebookresearch/projectaria_tools.git
