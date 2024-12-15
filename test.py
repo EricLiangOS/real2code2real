@@ -1,77 +1,103 @@
+import os
+# os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
+os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default is 'auto'.
+                                            # 'auto' is faster but will do benchmarking at the beginning.
+                                            # Recommended to set to 'native' if run only once.
 
-import os, shutil
+from argparse import ArgumentParser
+import imageio
 from PIL import Image
+from mesh_extraction.trellis.pipelines import TrellisImageTo3DPipeline
+from mesh_extraction.trellis.utils import render_utils, postprocessing_utils
 
+def get_pipeline():
+    pipeline = TrellisImageTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-large")
 
-def copy_dataset(input_directory, output_directory, dataset_size):
-    # Create the output directory if it doesn't exist
-    os.makedirs(output_directory, exist_ok=True)
+    return pipeline
 
-    # Get a sorted list of all image files in the input directory
-    # Get all image files in the folder
+def get_number(word):
+    numbers = ""
+    for char in word:
+        if char.isnumeric():
+            numbers += char
+    
+    return int(numbers)
+
+def generate(args, pipeline):
+    source_path = args.source_path
+    pointcloud_path = args.file_path
+    output_path = args.output_path
+
+    pipeline.cuda()
+
+    images = []
+
     frame_names = [
-        p for p in os.listdir(input_directory)
-        if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG", ".png"]
+        p for p in os.listdir(source_path)
     ]
-    frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
+    # .split("_")[1])
+    frame_names.sort(key=lambda p: get_number(os.path.splitext(p)[0]))
 
-    # Copy and rename every nth image to the output directory
-    save_frequency = len(os.listdir(input_directory)) * 1.0/dataset_size
-    for index in range(dataset_size):
-        src_path = os.path.join(input_directory, frame_names[int(index * save_frequency)])
-        dst_path = os.path.join(output_directory, f"{index}.jpg")
+    # Load an image
+    frequency = len(frame_names)/args.num_images
 
-        if os.path.isfile(src_path):
-            shutil.copy2(src_path, dst_path)
-
-    print(f"Made a copy of {dataset_size} files to '{output_directory}' with lossless quality.")
+    for i in range(args.num_images):
+        image_name = frame_names[int(i * frequency)]
+        print(image_name)
+        images.append(Image.open(os.path.join(source_path, image_name)))
 
 
+    # Run the pipeline
+    output = pipeline.run(
+        images,
+        # Optional parameters
+        seed=1,
+        main_path=pointcloud_path,
+        # sparse_structure_sampler_params={
+        #     "steps": 12,
+        #     "cfg_strength": 7.5,
+        # },
+        # slat_sampler_params={
+        #     "steps": 12,
+        #     "cfg_strength": 3,
+        # },
+    )
 
+    # Render the outputs
+    video = render_utils.render_video(output['gaussian'][0])['color']
+    imageio.mimsave(output_path.split(".")[0] + "_gs.mp4", video, fps=30)
+    video = render_utils.render_video(output['mesh'][0])['normal']
+    imageio.mimsave(output_path.split(".")[0] + "_mesh.mp4", video, fps=30)
+    # GLB files can be extracted from the output
+    glb = postprocessing_utils.to_glb(
+        output['gaussian'][0],
+        output['mesh'][0],
+        # Optional parameters
+        simplify=0.1,          # Ratio of triangles to remove in the simplification process
+        texture_size=1024,      # Size of the texture used for the GLB
+    )
+    glb.export(output_path)
 
-def remove_jpegs(input_directory):
-    # Get a list of all files in the directory
-    all_files = os.listdir(input_directory)
+    
 
-    # Filter only .jpg files
-    jpg_files = [file for file in all_files if file.endswith(".jpg")]
+if __name__ == "__main__":
 
-    # Delete each .jpg file
-    for file in jpg_files:
-        file_path = os.path.join(input_directory, file)
-        try:
-            os.remove(file_path)
-            print(f"Deleted: {file_path}")
-        except Exception as e:
-            print(f"Error deleting {file_path}: {e}")
+    parser = ArgumentParser("Get masks and mesh extracts of objects within a scene")
 
-    print("All .jpg files have been deleted.")
+    # parser.add_argument("--source_path", "-s", required=True, type=str)
+    # parser.add_argument("--model_path", "-m", required=True, type=str)
+    parser.add_argument("--num_images", type=int, default=10)
 
-def rename_images(input_directory):
-    # Initial values for renaming
-    start_number = 0
-    extension = ".jpg"
+    pipeline = get_pipeline()
+    args = parser.parse_args()
 
-    # Get all image files in the folder
-    frame_names = [
-        p for p in os.listdir(input_directory)
-        if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
-    ]
-    frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
+    args.source_path = "/store/real/ehliang/r2c2r_blender_data_2/r2c2r_data/test/StorageFurniture/44781/loop_0/link_2_rgb"
+    args.output_path = "outputs/drawer4.glb"
+    args.file_path = "/store/real/ehliang/r2c2r_blender_data_2/r2c2r_data/test/StorageFurniture/44781/loop_0/link_2.ply"
 
-    # Rename each file
-    for i, file in enumerate(frame_names):
-        new_name = f"frame_{(start_number + i):05d}{extension}"
-        old_path = os.path.join(input_directory, file)
-        new_path = os.path.join(input_directory, new_name)
-        os.rename(old_path, new_path)
-        print(f"Renamed: {file} -> {new_name}")
+    # source_path = "/store/real/ehliang/r2c2r_blender_data/r2c2r_data/test/StorageFurniture/44781/loop_0/link_3_rgb"
+    # model_path = "outputs/merged_example.glb"
+    # pointcloud_path = "/store/real/ehliang/r2c2r_blender_data/r2c2r_data/test/StorageFurniture/44781/loop_0/link_3.ply"
 
-# dataset = "/store/real/ehliang/data/test_2/rgb"
-# output = "/store/real/ehliang/data/test_2/desk/cam01"
-# copy_dataset(dataset, output, 5)
-# rename_images(output)
-
-copy_dataset("/store/real/ehliang/data/new_kitchen_3/object_1/images", "/store/real/ehliang/data/sample/object_1", 30)
-copy_dataset("/store/real/ehliang/data/new_kitchen_3/object_2/images", "/store/real/ehliang/data/sample/object_2", 30)
-copy_dataset("/store/real/ehliang/data/new_kitchen_3/object_3/images", "/store/real/ehliang/data/sample/object_3", 30)
+    generate(args, pipeline)
+    

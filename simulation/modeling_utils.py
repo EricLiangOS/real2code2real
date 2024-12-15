@@ -4,6 +4,9 @@ import bpy
 import argparse
 from PIL import Image
 import trimesh
+from pygltflib import GLTF2
+from aspose.threed import Scene
+from aspose.threed.formats import *
 
 class bcolors:
     HEADER = '\033[95m'
@@ -39,6 +42,12 @@ def create_xml(texture_path, object_path, output_path):
     """
     with open(output_path, 'w') as f:
         f.write(xml_content)
+
+def convert_to_obj(input_path, output_path):
+    scene = Scene.from_file(input_path)
+    objSaveOptions = ObjSaveOptions()
+
+    scene.save(output_path, objSaveOptions)
 
 # convert ply file with vertex colors into an obj file with vertex colors
 def convert_ply_to_obj(ply_path, output_path):
@@ -195,14 +204,15 @@ def get_objects_from_directory(input_dir):
     obj_list = [ item for item in os.listdir(input_dir) if os.path.isdir(os.path.join(input_dir, item)) ]
 
     for obj in obj_list:
-        ply_file = os.path.join(input_dir, obj, "output", f"{obj}.ply")
-        raw_object = os.path.join(raw_object_path, f"{obj}.obj")
+        for instance in os.listdir(os.path.join(input_dir, obj)):
+            input_file = os.path.join(input_dir, obj, instance)
+            raw_object = os.path.join(raw_object_path, f"{obj}_{instance}.obj")
 
-        if not os.path.isfile(ply_file) or (obj != "object_3" and obj != "object_1"):
-            continue
-        
-        convert_ply_to_obj(ply_file, raw_object)
-        extract_texture_from_obj(raw_object, assets_path)
+            if not os.path.isfile(input_file):
+                continue
+            
+            convert_to_obj(input_file, raw_object)
+            extract_texture_from_obj(raw_object, assets_path)
 
     generate_mujoco_files(os.path.join(input_dir, "envs"))
 

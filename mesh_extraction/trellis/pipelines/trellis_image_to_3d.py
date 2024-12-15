@@ -12,6 +12,7 @@ from .base import Pipeline
 from . import samplers
 from ..modules import sparse as sp
 from ..representations import Gaussian, Strivec, MeshExtractResult
+from ...utils.generate_utils import convert_obj_to_voxel, convert_ply_to_voxel, save_tensor_to_voxel, convert_ply_to_voxel_detailed
 
 
 class TrellisImageTo3DPipeline(Pipeline):
@@ -190,7 +191,23 @@ class TrellisImageTo3DPipeline(Pipeline):
         
         # Decode occupancy latent
         decoder = self.models['sparse_structure_decoder']
-        coords = torch.argwhere(decoder(z_s)>0)[:, [0, 2, 3, 4]].int()
+    
+        coords = torch.argwhere(decoder(z_s > 0))[:, [0, 2, 3, 4]].int()
+        return coords
+    
+    def sample_sparse_structure(self, input_path):
+        if input_path.split(".")[1] == "ply":
+            voxels = convert_ply_to_voxel(input_path)
+
+        elif input_path.split(".")[1] == "obj":
+            voxels = convert_obj_to_voxel(input_path)
+        
+        voxels = voxels.unsqueeze(0).unsqueeze(0).to(self.device)
+        print(voxels.shape)
+
+        save_tensor_to_voxel(voxels)
+
+        coords = torch.argwhere(voxels)[:, [0, 2, 3, 4]].int()
 
         return coords
 
@@ -256,8 +273,9 @@ class TrellisImageTo3DPipeline(Pipeline):
     @torch.no_grad()
     def run(
         self,
-        image: Image.Image,
+        images: Image.Image,
         num_samples: int = 1,
+        main_path: str = None,
         seed: int = 42,
         sparse_structure_sampler_params: dict = {},
         slat_sampler_params: dict = {},
@@ -274,10 +292,34 @@ class TrellisImageTo3DPipeline(Pipeline):
             slat_sampler_params (dict): Additional parameters for the structured latent sampler.
             preprocess_image (bool): Whether to preprocess the image.
         """
-        if preprocess_image:
-            image = self.preprocess_image(image)
-        cond = self.get_cond([image])
         torch.manual_seed(seed)
-        coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
-        slat = self.sample_slat(cond, coords, slat_sampler_params)
-        return self.decode_slat(slat, formats)
+        
+        if preprocess_image:
+            for i in range(len(images)):
+                images[i] = self.preprocess_image(images[i])
+            
+        coords = []
+
+        if main_path.split(".")[1] == "png":
+            main_image = self.preprocess_image(main_image)
+            sparse_cond = self.get_cond([main_image])
+            coords = self.sample_sparse_structure(sparse_cond, num_samples, sparse_structure_sampler_params)
+
+        else:
+            coords = self.sample_sparse_structure(main_path)
+        
+        feats = []
+
+        for image in images:
+            cond = self.get_cond([image])
+
+            slat = self.sample_slat(cond, coords, slat_sampler_params)
+            feats.append(slat.feats)
+        
+        total_feats = torch.stack(feats, dim=0)
+        total_feats = torch.mean(total_feats, dim=0)
+
+        slat_average = sp.SparseTensor(total_feats, coords)
+        output = self.decode_slat(slat_average, formats)
+
+        return output
