@@ -5,5 +5,5 @@
 	path = submodules/sam2
 	url = git@github.com:facebookresearch/sam2.git
 [submodule "projectaria_tools"]
-	path = projectaria_tools
+	path = submodules/projectaria_tools
 	url = git@github.com:facebookresearch/projectaria_tools.git

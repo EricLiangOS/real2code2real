@@ -1,9 +1,9 @@
 import os
 import shutil
 from argparse import ArgumentParser
-from utils.mask_utils import get_labeled_images, get_object_masks
+from real2code2real.utils.mask_utils import get_labeled_images, get_object_masks
 from utils.dataset_utils import copy_dataset,  convert_files, remove_jpegs
-from utils.generate_utils import generate, get_pipeline
+from real2code2real.utils.generate_utils import generate, get_pipeline
 import time
 
 class bcolors:

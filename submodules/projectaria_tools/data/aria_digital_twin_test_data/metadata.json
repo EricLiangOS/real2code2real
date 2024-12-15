@@ -1,0 +1,12 @@
+{
+    "serial": "1WM103600M1292",
+    "gt_creation_time": "05/30/2023-14:09:26",
+    "scene": "Apartment",
+    "is_multi_person": false,
+    "num_skeletons": 1,
+    "timecode_enabled": 1,
+    "gt_time_domain": "DEVICE_CAPTURE",
+    "concurrent_sequence": "",
+    "dataset_name": "ADT_2023",
+    "dataset_version": "2.0"
+}

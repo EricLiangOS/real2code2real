@@ -12,7 +12,7 @@ from .base import Pipeline
 from . import samplers
 from ..modules import sparse as sp
 from ..representations import Gaussian, Strivec, MeshExtractResult
-from ...utils.generate_utils import convert_obj_to_voxel, convert_ply_to_voxel, save_tensor_to_voxel, convert_ply_to_voxel_detailed
+from ....real2code2real.utils.generate_utils import convert_obj_to_voxel, convert_ply_to_voxel, save_tensor_to_voxel, convert_ply_to_voxel_detailed
 
 
 class TrellisImageTo3DPipeline(Pipeline):
