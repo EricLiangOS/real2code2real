@@ -13,54 +13,7 @@ import numpy as np
 import torch
 import scipy.ndimage
 
-def convert_obj_to_voxel(obj_path, grid_size=64):
-    mesh = trimesh.load(obj_path)
-    
-    # Compute the bounding box of the mesh
-    bounds = mesh.bounding_box.bounds
-    
-    # Calculate the scale and translation to fit the object in the grid
-    mesh_min = bounds[0]
-    mesh_max = bounds[1]
-    mesh_size = mesh_max - mesh_min
-    
-    # Determine the maximum dimension to ensure proper scaling
-    max_dimension = np.max(mesh_size)
-    
-    # Scale factor to fit the object in the grid
-    scale_factor = (grid_size - 1) / max_dimension
-    
-    # Create a transformation matrix
-    transform = np.eye(4)
-    transform[:3, :3] *= scale_factor
-    transform[:3, 3] = -mesh_min * scale_factor
-    
-    # Apply the transformation to center and scale the mesh
-    transformed_mesh = mesh.copy()
-    transformed_mesh.apply_transform(transform)
-    
-    # Create a voxel grid
-    voxel_grid = transformed_mesh.voxelized(pitch=1.0).matrix
-    
-    # Pad or crop the voxel grid to exactly match the grid size
-    if voxel_grid.shape[0] > grid_size or voxel_grid.shape[1] > grid_size or voxel_grid.shape[2] > grid_size:
-        voxel_grid = voxel_grid[:grid_size, :grid_size, :grid_size]
-    else:
-        pad_needed = grid_size - np.array(voxel_grid.shape)
-        voxel_grid = np.pad(voxel_grid, 
-                            ((0, pad_needed[0]), 
-                            (0, pad_needed[1]), 
-                            (0, pad_needed[2])), 
-                            mode='constant', 
-                            constant_values=0)
-    
-    # Convert to binary tensor (bool or float)
-    voxel_tensor = torch.tensor(voxel_grid > 0, dtype=torch.float32)
-    
-    return voxel_tensor
-
-
-def convert_ply_to_voxel(ply_path, grid_size=64, padding=10):
+def get_voxels(ply_path, grid_size=64, padding=10):
     pcd = o3d.io.read_point_cloud(ply_path)
     
     points = np.asarray(pcd.points)
@@ -91,12 +44,11 @@ def convert_ply_to_voxel(ply_path, grid_size=64, padding=10):
             0 <= z < grid_size):
             voxel_grid[x, y, z] = 1.0
     
-    # Convert to PyTorch tensor
     voxel_tensor = torch.tensor(voxel_grid, dtype=torch.float32)
     
     return voxel_tensor
 
-def save_tensor_to_voxel(voxels):
+def save_voxel(voxels):
     grid = voxels[0][0].detach().cpu().numpy()
 
     # Create new voxel grid object and set voxel_size to some value

@@ -31,4 +31,3 @@ def remove_black_spots(mesh, black_threshold = 0.025):
     mesh.remove_unreferenced_vertices()
 
     return mesh
-
