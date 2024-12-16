@@ -6,7 +6,7 @@ from PIL import Image
 from submodules.TRELLIS.trellis.modules import sparse as sp
 from submodules.TRELLIS.trellis.pipelines import samplers
 from submodules.TRELLIS.trellis.pipelines import TrellisImageTo3DPipeline
-from ..utils.generate_utils import get_voxels, save_voxel
+from ..utils.generate_utils import get_voxels, convert_voxels_to_pointcloud
 
 class PointcloudTo3DPipeline(TrellisImageTo3DPipeline):
     def __init__(
@@ -46,22 +46,24 @@ class PointcloudTo3DPipeline(TrellisImageTo3DPipeline):
 
         input_type = input_path.split(".")[1]
 
+        mapping = {}
         if input_type == "png":
             main_image = self.preprocess_image(main_image)
             sparse_cond = self.get_cond([main_image])
             coords = self.sample_sparse_structure(sparse_cond, 1, sparse_structure_sampler_params)
 
         else:
-            voxels = get_voxels(input_path)
+            voxels, transformation_info = get_voxels(input_path)
 
-            voxels = voxels.unsqueeze(0).unsqueeze(0).to(self.device)
-            print(voxels.shape)
+            voxel_tensor = torch.tensor(voxels, dtype=torch.float32)
+            voxel_tensor = voxel_tensor.unsqueeze(0).unsqueeze(0).to(self.device)
 
-            save_voxel(voxels)
+            coords = torch.argwhere(voxel_tensor)[:, [0, 2, 3, 4]].int()
 
-            coords = torch.argwhere(voxels)[:, [0, 2, 3, 4]].int()
+            mapping["voxels"] = convert_voxels_to_pointcloud(voxels)
+            mapping["transform"] = transformation_info
 
-        return coords
+        return coords, mapping
 
     @torch.no_grad()
     def run(
@@ -82,7 +84,7 @@ class PointcloudTo3DPipeline(TrellisImageTo3DPipeline):
             for i in range(len(images)):
                 images[i] = self.preprocess_image(images[i])
             
-        coords = self.get_sparse_structure(input_path)
+        coords, mapping = self.get_sparse_structure(input_path)
         
         feats = []
 
@@ -98,4 +100,4 @@ class PointcloudTo3DPipeline(TrellisImageTo3DPipeline):
         slat_average = sp.SparseTensor(total_feats, coords)
         output = self.decode_slat(slat_average, formats)
 
-        return output
+        return output, mapping

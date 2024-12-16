@@ -11,26 +11,24 @@ import open3d as o3d
 import trimesh
 import numpy as np
 import torch
-import scipy.ndimage
+import copy
 
-def get_voxels(ply_path, grid_size=64, padding=10):
+from submodules.TRELLIS.trellis.utils import render_utils, postprocessing_utils
+
+def get_voxels(ply_path, grid_size=64, padding=5):
     pcd = o3d.io.read_point_cloud(ply_path)
     
     points = np.asarray(pcd.points)
     
     min_bound = points.min(axis=0)
     max_bound = points.max(axis=0)
-    
     point_cloud_size = max_bound - min_bound
-    
     max_dimension = np.max(point_cloud_size)
     
     scale_factor = (grid_size - 2*padding - 1) / max_dimension
-    
     scaled_points = (points - min_bound) * scale_factor
     
     voxel_grid = np.zeros((grid_size, grid_size, grid_size), dtype=np.float32)
-    
     padding_offset = padding
     
     # Voxelize the point cloud
@@ -44,17 +42,76 @@ def get_voxels(ply_path, grid_size=64, padding=10):
             0 <= z < grid_size):
             voxel_grid[x, y, z] = 1.0
     
-    voxel_tensor = torch.tensor(voxel_grid, dtype=torch.float32)
-    
-    return voxel_tensor
+    transformation_info = {
+        'min_bound': min_bound,
+        'max_bound': max_bound,
+        'scale_factor': scale_factor,
+        'padding_offset': padding_offset
+    }
 
-def save_voxel(voxels):
+    return voxel_grid, transformation_info
+
+# Transforms aligning_obj to align with fixed_obj
+def align_bounding_boxes(aligning_obj, fixed_obj):
+
+    aligned_obj = copy.deepcopy(aligning_obj)
+
+    aligned_obj_bbox = aligned_obj.get_axis_aligned_bounding_box()
+    fixed_obj_bbox = fixed_obj.get_axis_aligned_bounding_box()
+    
+    aligned_obj_extent = aligned_obj_bbox.get_extent()
+    fixed_obj_extent = fixed_obj_bbox.get_extent()
+ 
+    scale_factors = fixed_obj_extent / aligned_obj_extent
+    fixed_obj_center = fixed_obj_bbox.get_center()
+    obj_center = aligned_obj_bbox.get_center()
+    translation = fixed_obj_center - obj_center
+    
+    aligned_obj.scale(sum(scale_factors)/len(scale_factors), obj_center)
+    
+    aligned_obj.translate(translation)
+    
+    return aligned_obj
+
+def reverse_mesh(mesh, transformation_info):
+    
+    translation_vector = np.array([-transformation_info['padding_offset']] * 3)
+    mesh.translate(translation_vector)
+
+    min_bound = transformation_info['min_bound']
+    scale_factor = transformation_info['scale_factor']
+    
+    mesh.scale(1 / scale_factor, center=np.zeros(3))
+    
+    translation_vector = min_bound
+    mesh.translate(translation_vector)
+        
+    return mesh
+
+def convert_voxels_to_pointcloud(grid):
+
+    voxel_pointcloud = o3d.geometry.PointCloud()
+    points = []
+
+    # Iterate over numpy grid
+    for z in range(grid.shape[2]):
+        for y in range(grid.shape[1]):
+            for x in range(grid.shape[0]):
+                if grid[x, y, z]:
+                    points.append([x, y, z])
+
+    voxel_pointcloud.points = o3d.utility.Vector3dVector(np.array(points))
+
+    return voxel_pointcloud
+
+
+def save_voxel(voxels, voxels_path):
     grid = voxels[0][0].detach().cpu().numpy()
 
     # Create new voxel grid object and set voxel_size to some value
     # --> otherwise it will default to 0 and the grid will be invisible
     voxel_grid = o3d.geometry.VoxelGrid()
-    voxel_grid.voxel_size = 0.1
+    voxel_grid.voxel_size = 1
     # Iterate over numpy grid
     for z in range(grid.shape[2]):
         for y in range(grid.shape[1]):
@@ -67,7 +124,7 @@ def save_voxel(voxels):
                 voxel.grid_index = np.array([x, y, z])
                 # Add voxel object to grid
                 voxel_grid.add_voxel(voxel)
-    o3d.io.write_voxel_grid("voxels.ply", voxel_grid)
+    o3d.io.write_voxel_grid(voxels_path, voxel_grid)
 
 def obb_from_axis(points: np.ndarray, axis_idx: int):
     """get the oriented bounding box from a set of points and a pre-defined axis"""
@@ -135,40 +192,89 @@ def obb_from_axis(points: np.ndarray, axis_idx: int):
  
     return dict(center=centroid, R=evec, extent=extent)
 
-def get_handcraft_obb(mesh, z_weight=1.5):
-    all_obbs = []
-    if isinstance(mesh, np.ndarray):
-        vertices = mesh    
-    else:
-        mesh.remove_unreferenced_vertices()
-        mesh.remove_degenerate_faces() 
-        vertices = np.array(mesh.vertices) 
-    if len(vertices) == 0:
-        return dict(center=np.zeros(3), R=np.eye(3), extent=np.ones(3))
-    for axis_idx in range(3):
-        obb_dict = obb_from_axis(vertices, axis_idx)
-        all_obbs.append(obb_dict)
 
-    # select obb with smallest volume, but prioritize axis z 
-    bbox_sizes = [np.prod(x['extent']) for x in all_obbs] 
-    bbox_sizes[2] /= z_weight # prioritize z axis 
-    min_size_idx  = np.argmin(bbox_sizes)
-    obb_dict = all_obbs[min_size_idx]
-    return obb_dict
+def get_obj_with_texture(
+    app_rep,
+    mesh,
+    texture_path,
+    simplify: float = 0.95,
+    fill_holes: bool = True,
+    fill_holes_max_size: float = 0.04,
+    texture_size: int = 1024,
+    debug: bool = False,
+    verbose: bool = True,
+):
 
-def convert_ply_to_voxel_detailed(ply_path):
+    vertices = mesh.vertices.cpu().numpy()
+    faces = mesh.faces.cpu().numpy()
     
-    # Read the point cloud
-    pcd = o3d.io.read_point_cloud(ply_path)
-    
-    # Convert to numpy array
-    scaled_points = np.asarray(pcd.points)
+    # mesh postprocess
+    vertices, faces = postprocessing_utils.postprocess_mesh(
+        vertices, faces,
+        simplify=simplify > 0,
+        simplify_ratio=simplify,
+        fill_holes=fill_holes,
+        fill_holes_max_hole_size=fill_holes_max_size,
+        fill_holes_max_hole_nbe=int(250 * np.sqrt(1-simplify)),
+        fill_holes_resolution=1024,
+        fill_holes_num_views=1000,
+        debug=debug,
+        verbose=verbose,
+    )
 
-    obb_dict = get_handcraft_obb(scaled_points)
+    # parametrize mesh
+    vertices, faces, uvs = postprocessing_utils.parametrize_mesh(vertices, faces)
 
-    center = torch.tensor(obb_dict['center']).cuda()
-    extent = torch.tensor(obb_dict['extent']).cuda()
-    R = torch.tensor(obb_dict['R']).cuda()
-    scaled_points = (torch.from_numpy(scaled_points).cuda() - center) @ R
+    # bake texture
+    observations, extrinsics, intrinsics = postprocessing_utils.render_multiview(app_rep, resolution=1024, nviews=100)
+    masks = [np.any(observation > 0, axis=-1) for observation in observations]
+    extrinsics = [extrinsics[i].cpu().numpy() for i in range(len(extrinsics))]
+    intrinsics = [intrinsics[i].cpu().numpy() for i in range(len(intrinsics))]
+    texture = postprocessing_utils.bake_texture(
+        vertices, faces, uvs,
+        observations, masks, extrinsics, intrinsics,
+        texture_size=texture_size, mode='opt',
+        lambda_tv=0.01,
+        verbose=verbose
+    )
+    texture = Image.fromarray(texture)
+    texture.save(texture_path)
 
-    return scaled_points
+    # rotate mesh (from z-up to y-up)
+    vertices = vertices @ np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
+    mesh = trimesh.Trimesh(vertices, faces, visual=trimesh.visual.TextureVisuals(uv=uvs, image=texture))
+    return mesh
+
+def get_object(output, output_path, object_name="", mapping = {}):
+    if object_name:
+        object_name += "_"
+        
+    texture_path = os.path.join(output_path, f"{object_name}texture.png")
+    mesh_path = os.path.join(output_path, f"{object_name}mesh.obj")
+
+    obj = postprocessing_utils.to_glb(
+        output['gaussian'][0],
+        output['mesh'][0],
+        # Optional parameters
+        simplify=0.1,          # Ratio of triangles to remove in the simplification process
+        texture_size=1024,      # Size of the texture used for the GLB
+    )
+
+    obj.export(mesh_path)
+    os.rename(os.path.join(output_path, "material_0.png"), texture_path)
+
+    print("Transforming object back to original position")
+    if "voxels" in mapping and "transform" in mapping:
+        transform_obj = o3d.io.read_triangle_mesh(mesh_path)
+        R = transform_obj.get_rotation_matrix_from_xyz((np.pi/2, 0, 0))
+        transform_obj.rotate(R, center=(0, 0, 0))
+
+        voxel_pointcloud = mapping["voxels"]
+
+        transform_obj = align_bounding_boxes(aligning_obj=transform_obj, fixed_obj=voxel_pointcloud)
+        transform_obj = reverse_mesh(transform_obj, mapping["transform"])
+
+        o3d.io.write_triangle_mesh(mesh_path, transform_obj)
+
+
+

@@ -1,2 +1,3 @@
 mesh_extraction/sam2/checkpoints/*.pt
 submodules/TRELLIS/trellis/representations/mesh/flexicubes/
+outputs/

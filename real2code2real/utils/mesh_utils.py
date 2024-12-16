@@ -1,5 +1,11 @@
+import imageio
 import open3d as o3d
 import numpy as np
+import trimesh
+from PIL import Image
+from submodules.TRELLIS.trellis.utils import render_utils, postprocessing_utils
+
+
 
 def remove_smaller_clusters(mesh):
     with o3d.utility.VerbosityContextManager(

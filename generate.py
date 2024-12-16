@@ -6,9 +6,9 @@ os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default
                                             # Recommended to set to 'native' if run only once.
 
 from argparse import ArgumentParser
-import imageio
 from PIL import Image
 from real2code2real.mesh_extraction import PointcloudTo3DPipeline
+from real2code2real.utils.generate_utils import get_object
 from submodules.TRELLIS.trellis.utils import render_utils, postprocessing_utils
 
 def get_pipeline():
@@ -26,8 +26,12 @@ def get_number(word):
 
 def generate(args, pipeline):
     source_path = args.source_path
-    pointcloud_path = args.file_path
+    file_path = args.file_path
     output_path = args.output_path
+
+    object_name = os.path.basename(os.path.normpath(output_path))
+
+    os.makedirs(output_path, exist_ok=True)
 
     pipeline.cuda()
 
@@ -49,11 +53,11 @@ def generate(args, pipeline):
 
 
     # Run the pipeline
-    output = pipeline.run(
+    output, mapping = pipeline.run(
         images,
         # Optional parameters
         seed=1,
-        input_path=pointcloud_path,
+        input_path=file_path,
         # sparse_structure_sampler_params={
         #     "steps": 12,
         #     "cfg_strength": 7.5,
@@ -64,20 +68,7 @@ def generate(args, pipeline):
         # },
     )
 
-    # Render the outputs
-    video = render_utils.render_video(output['gaussian'][0])['color']
-    imageio.mimsave(output_path.split(".")[0] + "_gs.mp4", video, fps=30)
-    video = render_utils.render_video(output['mesh'][0])['normal']
-    imageio.mimsave(output_path.split(".")[0] + "_mesh.mp4", video, fps=30)
-    # GLB files can be extracted from the output
-    glb = postprocessing_utils.to_glb(
-        output['gaussian'][0],
-        output['mesh'][0],
-        # Optional parameters
-        simplify=0.1,          # Ratio of triangles to remove in the simplification process
-        texture_size=1024,      # Size of the texture used for the GLB
-    )
-    glb.export(output_path)
+    get_object(output, output_path, object_name, mapping)
 
     
 
@@ -92,9 +83,9 @@ if __name__ == "__main__":
     pipeline = get_pipeline()
     args = parser.parse_args()
 
-    args.source_path = "/store/real/ehliang/r2c2r_blender_data_2/r2c2r_data/test/StorageFurniture/44781/loop_0/link_2_rgb"
-    args.output_path = "outputs/drawer4.glb"
-    args.file_path = "/store/real/ehliang/r2c2r_blender_data_2/r2c2r_data/test/StorageFurniture/44781/loop_0/link_2.ply"
+    args.source_path = "/store/real/ehliang/r2c2r_blender_data_2/r2c2r_data/test/StorageFurniture/44781/loop_0/link_3_rgb"
+    args.output_path = "outputs/object_3_test"
+    args.file_path = "/store/real/ehliang/r2c2r_blender_data_2/r2c2r_data/test/StorageFurniture/44781/loop_0/link_3.ply"
 
     # source_path = "/store/real/ehliang/r2c2r_blender_data/r2c2r_data/test/StorageFurniture/44781/loop_0/link_3_rgb"
     # model_path = "outputs/merged_example.glb"
