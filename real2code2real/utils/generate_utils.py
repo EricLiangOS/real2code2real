@@ -41,7 +41,9 @@ def get_voxels(ply_path, grid_size=64, padding=5):
             0 <= y < grid_size and 
             0 <= z < grid_size):
             voxel_grid[x, y, z] = 1.0
-    
+
+    voxel_grid = fill_voxel_holes(voxel_grid)
+
     transformation_info = {
         'min_bound': min_bound,
         'max_bound': max_bound,
@@ -50,6 +52,44 @@ def get_voxels(ply_path, grid_size=64, padding=5):
     }
 
     return voxel_grid, transformation_info
+
+def convert_voxels_to_pc(grid):
+
+    voxel_pcd = o3d.geometry.PointCloud()
+    points = []
+
+    # Iterate over numpy grid
+    for z in range(grid.shape[2]):
+        for y in range(grid.shape[1]):
+            for x in range(grid.shape[0]):
+                if grid[x, y, z]:
+                    points.append([x, y, z])
+                    continue
+    
+    voxel_pcd.points = o3d.utility.Vector3dVector(np.array(points))
+
+    return voxel_pcd
+
+def fill_voxel_holes(voxel_grid, threshold = 15):
+    
+    filled_voxel_grid = copy.deepcopy(voxel_grid)
+
+    for x in range(1, voxel_grid.shape[2]):
+        for y in range(1, voxel_grid.shape[1]):
+            for z in range(1, voxel_grid.shape[0]):
+
+                counter = 0
+
+                for i in range(-1, 2):
+                    for j in range(-1, 2):
+                        for k in range(-1, 2):
+                            if (x + i >= 0 and x + i < 64 and y + j >= 0 and y + j < 64 and z + k >= 0 and z + k < 64):
+                                counter += voxel_grid[x + i, y + j, z + k]
+                
+                if counter > threshold:
+                    filled_voxel_grid[x, y, z] = 1
+    
+    return filled_voxel_grid
 
 # Transforms aligning_obj to align with fixed_obj
 def align_bounding_boxes(aligning_obj, fixed_obj):
@@ -87,22 +127,6 @@ def reverse_mesh(mesh, transformation_info):
     mesh.translate(translation_vector)
         
     return mesh
-
-def convert_voxels_to_pointcloud(grid):
-
-    voxel_pointcloud = o3d.geometry.PointCloud()
-    points = []
-
-    # Iterate over numpy grid
-    for z in range(grid.shape[2]):
-        for y in range(grid.shape[1]):
-            for x in range(grid.shape[0]):
-                if grid[x, y, z]:
-                    points.append([x, y, z])
-
-    voxel_pointcloud.points = o3d.utility.Vector3dVector(np.array(points))
-
-    return voxel_pointcloud
 
 
 def save_voxel(voxels, voxels_path):
@@ -192,59 +216,6 @@ def obb_from_axis(points: np.ndarray, axis_idx: int):
  
     return dict(center=centroid, R=evec, extent=extent)
 
-
-def get_obj_with_texture(
-    app_rep,
-    mesh,
-    texture_path,
-    simplify: float = 0.95,
-    fill_holes: bool = True,
-    fill_holes_max_size: float = 0.04,
-    texture_size: int = 1024,
-    debug: bool = False,
-    verbose: bool = True,
-):
-
-    vertices = mesh.vertices.cpu().numpy()
-    faces = mesh.faces.cpu().numpy()
-    
-    # mesh postprocess
-    vertices, faces = postprocessing_utils.postprocess_mesh(
-        vertices, faces,
-        simplify=simplify > 0,
-        simplify_ratio=simplify,
-        fill_holes=fill_holes,
-        fill_holes_max_hole_size=fill_holes_max_size,
-        fill_holes_max_hole_nbe=int(250 * np.sqrt(1-simplify)),
-        fill_holes_resolution=1024,
-        fill_holes_num_views=1000,
-        debug=debug,
-        verbose=verbose,
-    )
-
-    # parametrize mesh
-    vertices, faces, uvs = postprocessing_utils.parametrize_mesh(vertices, faces)
-
-    # bake texture
-    observations, extrinsics, intrinsics = postprocessing_utils.render_multiview(app_rep, resolution=1024, nviews=100)
-    masks = [np.any(observation > 0, axis=-1) for observation in observations]
-    extrinsics = [extrinsics[i].cpu().numpy() for i in range(len(extrinsics))]
-    intrinsics = [intrinsics[i].cpu().numpy() for i in range(len(intrinsics))]
-    texture = postprocessing_utils.bake_texture(
-        vertices, faces, uvs,
-        observations, masks, extrinsics, intrinsics,
-        texture_size=texture_size, mode='opt',
-        lambda_tv=0.01,
-        verbose=verbose
-    )
-    texture = Image.fromarray(texture)
-    texture.save(texture_path)
-
-    # rotate mesh (from z-up to y-up)
-    vertices = vertices @ np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
-    mesh = trimesh.Trimesh(vertices, faces, visual=trimesh.visual.TextureVisuals(uv=uvs, image=texture))
-    return mesh
-
 def get_object(output, output_path, object_name="", mapping = {}):
     if object_name:
         object_name += "_"
@@ -269,9 +240,9 @@ def get_object(output, output_path, object_name="", mapping = {}):
         R = transform_obj.get_rotation_matrix_from_xyz((np.pi/2, 0, 0))
         transform_obj.rotate(R, center=(0, 0, 0))
 
-        voxel_pointcloud = mapping["voxels"]
+        voxel_pcd = mapping["voxels"]
 
-        transform_obj = align_bounding_boxes(aligning_obj=transform_obj, fixed_obj=voxel_pointcloud)
+        transform_obj = align_bounding_boxes(aligning_obj=transform_obj, fixed_obj=voxel_pcd)
         transform_obj = reverse_mesh(transform_obj, mapping["transform"])
 
         o3d.io.write_triangle_mesh(mesh_path, transform_obj)

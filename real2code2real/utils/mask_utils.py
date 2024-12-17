@@ -2,10 +2,10 @@ import os
 import matplotlib.pyplot as plt
 from PIL import Image
 import numpy as np
-from sam2.build_sam import build_sam2_video_predictor
+from submodules.sam2.sam2.build_sam import build_sam2_video_predictor
 import torch
 import subprocess
-sam2_checkpoint = "mesh_extraction/sam2/checkpoints/sam2.1_hiera_large.pt"
+sam2_checkpoint = "submodules/sam2/checkpoints/sam2.1_hiera_large.pt"
 model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
 # select the device for computation

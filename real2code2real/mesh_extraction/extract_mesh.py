@@ -1,153 +1,243 @@
 import os
-import shutil
-from argparse import ArgumentParser
-from real2code2real.utils.mask_utils import get_labeled_images, get_object_masks
-from utils.dataset_utils import copy_dataset,  convert_files, remove_jpegs
-from render import render_mesh
-from arguments import ModelParams, PipelineParams, OptimizationParams
-from train import training
-import time
-import sys
+import matplotlib.pyplot as plt
+from PIL import Image
+import numpy as np
+from submodules.sam2.sam2.build_sam import build_sam2_video_predictor
+import torch
+import subprocess
+sam2_checkpoint = "submodules/sam2/checkpoints/sam2.1_hiera_large.pt"
+model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
-class bcolors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
+# select the device for computation
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
 
-parser = ArgumentParser("Get masks and mesh extracts of objects within a scene")
-lp = ModelParams(parser)
-op = OptimizationParams(parser)
-pp = PipelineParams(parser)
-parser.add_argument("--dataset_size", default = 1100, type = int)
-parser.add_argument("--skip_training", action='store_true', default=False)
-parser.add_argument("--skip_rendering", action='store_true', default=False)
+def get_labeled_images(labeled_dir, images_dir):
 
-# Training arguments
-parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
-parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
-parser.add_argument("--start_checkpoint", type=str, default = None)
+    # Create a directory of all the labeled images to prompt SAM to create masks
+    frame_names = [
+        p for p in os.listdir(images_dir)
+        if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG", ".png"]
+    ]
+    frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
 
-# Mesh arguments
-parser.add_argument("--voxel_size", default=-1.0, type=float, help='Mesh: voxel size for TSDF')
-parser.add_argument("--depth_trunc", default=-1.0, type=float, help='Mesh: Max depth range for TSDF')
-parser.add_argument("--sdf_trunc", default=-1.0, type=float, help='Mesh: truncation value for TSDF')
-parser.add_argument("--mesh_res", default=1024, type=int, help='Mesh: resolution for unbounded mesh extraction')
-args = parser.parse_args(sys.argv[1:])
+    os.makedirs(labeled_dir, exist_ok=True)
 
-os.makedirs(args.model_path, exist_ok=True)
-if args.model_path:
-    base_output_dir = os.path.join(args.model_path, time.strftime("%Y%m%d-%H%M%S"))
+    for index, frame in enumerate(frame_names):
+        if ((index % 2) == 0):
+            plt.figure(figsize=(9, 6))
+            plt.title(f"frame {index}")
 
-base_dir = args.source_path
-raw_dir = os.path.join(base_dir, "rgb")
-input_dir = os.path.join(base_dir, "input")
-labeled_dir = os.path.join(base_dir, "labeled")
-background_masks_dir = os.path.join(base_dir, "images")
+            img = Image.open(f"{images_dir}/{frame}")
+            width, height = img.size
+            plt.imshow(img)
+            plt.xticks(range(0, width, 100))
+            plt.yticks(range(0, height, 100))
+            plt.grid()
+            plt.savefig(f"{labeled_dir}/{frame}")
+            plt.close()
 
-# Reduce the dataset size
-if not os.path.isdir(input_dir):
-    print(bcolors.OKCYAN + f"Making reduced dataset directory at {input_dir}" + bcolors.ENDC)
-    copy_dataset(raw_dir, input_dir, args.dataset_size)
-print(bcolors.OKGREEN + f"Reduced dataset successfully created at {input_dir}" + bcolors.ENDC)
+def show_mask(mask, ax, obj_id=None, random_color=False):
+    if random_color:
+        color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
+    else:
+        cmap = plt.get_cmap("tab10")
+        cmap_idx = 0 if obj_id is None else obj_id
+        color = np.array([*cmap(cmap_idx)[:3], 0.6])
+    h, w = mask.shape[-2:]
+    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+    ax.imshow(mask_image)
 
-# Get labeled images for precision prompting
-if not os.path.isdir(labeled_dir):
-    print(bcolors.OKCYAN + f"Now getting labeled images and saving at {labeled_dir}" + bcolors.ENDC)
-    get_labeled_images(labeled_dir, input_dir)
-print(bcolors.OKGREEN + f"Labeled dataset successfully created at {labeled_dir}" + bcolors.ENDC)
+def show_points(coords, labels, ax, marker_size=200):
+    pos_points = coords[labels==1]
+    neg_points = coords[labels==0]
+    ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
+    ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
 
-all_object_prompts = {}
-frame_intervals = []
 
-# Get information for each object in order  
-num_objects = int(input("Enter desired number of objects: "))
-for obj in range(num_objects):
-    frames = input(f"For the reconstruction interval of object {obj + 1}, enter its first and last frame of appearance").split(" ")
-    start_frame, end_frame = int(frames[0]), int(frames[1])
+def show_box(box, ax):
+    x0, y0 = box[0], box[1]
+    w, h = box[2] - box[0], box[3] - box[1]
+    ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0, 0, 0, 0), lw=2))
 
-    user_input = input(f"For part of object {obj + 1}, enter the its first frame appearance, the type of prompt, and coordinates: ").split(" ")
-    object_prompts = []
-    frame_intervals.append([start_frame, end_frame])
-    while len(user_input) > 1:
-        starting_index = int(user_input[0])
-        prompts = [int(user_input[1])]
+def get_masks(images_dir, object_prompts):
+    video_segments = {}  # video_segments contains the per-frame segmentation results
+    predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint, device=device)
 
-        for i in range(1, len(user_input)//2):
-            prompts.append([int(user_input[2 * i]), int(user_input[2 * i + 1])])
+    inference_state = predictor.init_state(video_path=images_dir)
+
+    for index in range(len(os.listdir(images_dir))):
+        video_segments[index] = {}
+        video_segments[index][1] = torch.zeros(inference_state["video_height"], inference_state["video_width"], dtype=torch.bool).cpu().numpy()
+        video_segments[index][-1] = torch.ones(inference_state["video_height"], inference_state["video_width"], dtype=torch.bool).cpu().numpy()
+
+    for frame, prompts in object_prompts:
         
-        object_prompts.append((starting_index - frame_intervals[obj][0], prompts))
+        predictor.reset_state(inference_state)
+        ann_obj_id = 1
+    
+        prompt = np.array(prompts[1::], dtype=np.float32)
+        labels = np.array([1] * len(prompt), np.int32)
 
-        user_input = input(f"For part of object {obj + 1}, enter the its first frame appearance, the type of prompt, and coordinates. Press return once done: ").split(" ")
+        if prompts[0] == 0:
+            _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
+                inference_state=inference_state,
+                frame_idx=frame,
+                obj_id=ann_obj_id,
+                box=prompt,
+            )
+        else:
+            _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
+                inference_state=inference_state,
+                frame_idx=frame,
+                obj_id=ann_obj_id,
+                points=prompt,
+                labels = labels,
+            )         
+    
+        for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):       
+            if (prompts[0] == 1):    
+                video_segments[out_frame_idx][1] =  video_segments[out_frame_idx][1] | (out_mask_logits > 0.0).cpu().numpy()
+                video_segments[out_frame_idx][-1] = video_segments[out_frame_idx][-1] & (out_mask_logits <= 0.0).cpu().numpy()
+            else:
+                video_segments[out_frame_idx][1] =  video_segments[out_frame_idx][1] & (out_mask_logits <= 0.0).cpu().numpy()
 
-    all_object_prompts[obj] = object_prompts
+    return video_segments, inference_state
 
-# Create new directory and calculate masks for each object
-for obj in range(num_objects):
+def save_masks(video_segments, images_dir):
+    filepath = os.path.join(images_dir, "sam_masks.npz")
+    flattened_dict = {}
+    for index in video_segments:
+        for obj in video_segments[index]:
+            flattened_dict[f"{index}/{obj}"] = video_segments[index][obj]
+    
+    # Save as a compressed .npz file
+    np.savez_compressed(filepath, **flattened_dict)
+    print(f"Dictionary saved to {filepath}.")
 
-    # Split images into separate directories
-    object_dir = os.path.join(base_dir, f"object_{obj + 1}")
-    os.makedirs(object_dir, exist_ok=True)
+def load_masks(images_dir):
+    filepath = os.path.join(images_dir, "sam_masks.npz")
+    loaded_data = np.load(filepath, allow_pickle=True)
+    
+    nested_dict = {}
+    for compound_key, array in loaded_data.items():
+        # Split the compound key back into outer and inner keys
+        outer_key, inner_key = compound_key.split('/')
+        if outer_key not in nested_dict:
+            nested_dict[int(outer_key)] = {}
+        nested_dict[int(outer_key)][int(inner_key)] = array
+    
+    print(f"Dictionary loaded from {filepath}.")
+    return nested_dict
+
+def standardize_names(images_dir, frame_names):
+
+    # Rename each file
+    for i, file in enumerate(frame_names):
+        old_path = os.path.join(images_dir, file)
+        new_path = os.path.join(images_dir, f"{i}.jpg")
+        os.rename(old_path, new_path)
+
+def unstandardize_names(output_dir, frame_names, extension):
+
+    for i, file in reversed(list(enumerate(frame_names))):
+        old_path = os.path.join(output_dir, f"{i}{extension}")
+        new_path = os.path.join(output_dir, file.split(".")[0] + extension)
+        os.rename(old_path, new_path)
+
+# Create video from a series of frames in {output_dir}/images
+def create_video(base_dir, fps=30):
+    images_dir = os.path.join(base_dir, "images")
+    output_dir = os.path.join(base_dir, "output")
+
+    os.makedirs(output_dir, exist_ok=True)  # Ensure directory exists
+
+    output_video = os.path.join(output_dir, "masked_video.mp4")
+    # Create a video using ffmpeg
+    try:
+        # Run ffmpeg command quietly
+        with open(os.devnull, 'w') as devnull:
+            subprocess.run([
+                'ffmpeg', '-y',  # Overwrite output file if it exists
+                '-framerate', str(fps),  # Set frame rate
+                '-i', os.path.join(images_dir, '%d.png'),  # Input images pattern
+                '-pix_fmt', 'yuv420p',  # Pixel format for compatibility
+                output_video
+            ], stdout=devnull, stderr=devnull, check=True)
+        print(f"Video successfully created at: {output_video}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error occurred during video creation: {e}")
+        
+
+def save_masked_image_as_rgba(image, mask, save_path):
+
+    mask = mask.astype(bool)
+    
+    # Create an RGBA image
+    rgba_image = np.zeros((image.shape[0], image.shape[1], 4), dtype=np.uint8)
+    
+    # Set RGB channels
+    rgba_image[..., :3] = image  # Copy the RGB channels
+    
+    # Set alpha channel (255 for True, 0 for False)
+    rgba_image[..., 3] = mask.astype(np.uint8) * 255
+    
+    # Set background to black where mask is False
+    rgba_image[~mask, :3] = 0
+    
+    # Save the image using Pillow
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)  # Ensure directory exists
+    Image.fromarray(rgba_image).save(save_path)
+
+def remove_image_type(target_directory, type):
+
+    # Get a list of all files in the directory
+    all_files = os.listdir(target_directory)
+
+    # Filter only .jpg files
+    jpg_files = [file for file in all_files if file.endswith(type)]
+
+    # Delete each .jpg file
+    for file in jpg_files:
+        file_path = os.path.join(target_directory, file)
+        try:
+            os.remove(file_path)
+            print(f"Deleted: {file_path}")
+        except Exception as e:
+            print(f"Error deleting {file_path}: {e}")
+
+def get_object_masks(object_dir, prompts, background_dir = ""):
 
     object_input_dir = os.path.join(object_dir, "input")
-    if not os.path.isdir(object_input_dir):
-        print(bcolors.OKCYAN + f"Making copies of input in object directory for object {obj + 1}"+ bcolors.ENDC)
-        os.makedirs(object_input_dir, exist_ok=True)
-        
-        # Copy existing files to a separate directory
-        for file_index in range(frame_intervals[obj][0], frame_intervals[obj][1]):
-            file_path = os.path.join(input_dir, f"{file_index}.jpg")
-            if os.path.isfile(file_path):
-                shutil.copy2(file_path, object_input_dir)
+    object_output_dir = os.path.join(object_dir, "images")
+    os.makedirs(object_output_dir, exist_ok=True)
+
+    #  scan all names to convert back to the original name
+    frame_names = [
+        p for p in os.listdir(object_input_dir)
+        if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
+    ]
+    frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
+
+    standardize_names(object_input_dir, frame_names)
+
+    if "sam_masks.npz" in os.listdir(object_input_dir):
+        video_segments = load_masks(object_input_dir)
     else:
-        print(bcolors.OKGREEN + f"Object input directory already found for object {obj + 1}" + bcolors.ENDC)
-    
-    # Create local colmap for this object
-    if not os.path.isdir(os.path.join(object_dir, "colmap")):
-        print(bcolors.OKCYAN + "Getting COLMAP for object " + str(obj + 1) + bcolors.ENDC)
-        convert_files(object_dir)
+        video_segments, inference_state = get_masks(object_input_dir, prompts)
 
-    # Get masks for the object directory and its background
-    if not os.path.isdir(os.path.join(object_dir, "images")):
-        print(bcolors.OKCYAN + f"Getting masks for object {obj + 1}" + bcolors.ENDC)
-        get_object_masks(object_dir, all_object_prompts[obj], background_masks_dir)
+        for index in video_segments:
+            mask = video_segments[index][1][0][0]
+            image = np.array(Image.open(f"{object_input_dir}/{index}.jpg"))
+            masked_image = np.where(mask[..., None], image, 0)  # Add channel dimension for broadcasting
 
-        print(bcolors.OKGREEN + f"Masks successfully created for object {obj + 1}" + bcolors.ENDC)
-    else:
-        print(bcolors.OKGREEN + f"Masks directory already found for object {obj + 1}" + bcolors.ENDC)
-        
-    print(bcolors.OKGREEN + "COLMAP successfully for object " + str(obj + 1) + bcolors.ENDC)
+            save_masked_image_as_rgba(masked_image, mask, f"{object_output_dir}/{index}.png")            
 
-    # Train 2d gaussians for each part of the object
-    args.source_path = object_dir
+    create_video(object_dir)
 
-    args.model_path = os.path.join(base_output_dir, f"object_{obj + 1}")
-    args.save_iterations.append(args.iterations)
-    
-    if (not args.skip_training):
-        os.makedirs(args.model_path, exist_ok=True)
-        print(bcolors.OKCYAN + f"Training 2DGS for object {obj + 1}" + bcolors.ENDC)   
+    print(f"Masks saved to {object_output_dir}")
 
-        try:
-            training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint)
-            print(bcolors.OKGREEN + f"2DGS successfully trained for object {obj + 1} at {args.model_path}" + bcolors.ENDC)
-        except Exception as e:
-            print(bcolors.FAIL + "Error training: " + e + bcolors.ENDC)
-
-        if (not args.skip_rendering):
-            # Get the mesh
-            print(bcolors.OKCYAN + f"Training 2DGS for {obj + 1}" + bcolors.ENDC)   
-            try:
-                render_mesh(args, f"object_{obj + 1}")
-                print(bcolors.OKGREEN + f"Mesh successfully extracted for object {obj + 1} at {args.model_path}" + bcolors.ENDC)
-            except Exception as e:
-                print(bcolors.FAIL + "Error extracting mesh" + e + bcolors.ENDC)
-
-
-
+    unstandardize_names(object_output_dir, frame_names, ".png")
+    unstandardize_names(object_input_dir, frame_names, ".jpg")

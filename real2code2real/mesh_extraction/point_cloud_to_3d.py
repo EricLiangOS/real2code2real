@@ -6,9 +6,9 @@ from PIL import Image
 from submodules.TRELLIS.trellis.modules import sparse as sp
 from submodules.TRELLIS.trellis.pipelines import samplers
 from submodules.TRELLIS.trellis.pipelines import TrellisImageTo3DPipeline
-from ..utils.generate_utils import get_voxels, convert_voxels_to_pointcloud
+from ..utils.generate_utils import get_voxels, convert_voxels_to_pc
 
-class PointcloudTo3DPipeline(TrellisImageTo3DPipeline):
+class PointCloudTo3DPipeline(TrellisImageTo3DPipeline):
     def __init__(
         self,
         models = None,
@@ -23,10 +23,10 @@ class PointcloudTo3DPipeline(TrellisImageTo3DPipeline):
         super.__init__(self, models, sparse_structure_sampler, slat_sampler, slat_normalization, image_cond_model)
 
     @staticmethod
-    def from_pretrained(path: str) -> "PointcloudTo3DPipeline":
+    def from_pretrained(path: str) -> "PointCloudTo3DPipeline":
 
-        pipeline = super(PointcloudTo3DPipeline, PointcloudTo3DPipeline).from_pretrained(path)
-        new_pipeline = PointcloudTo3DPipeline()
+        pipeline = super(PointCloudTo3DPipeline, PointCloudTo3DPipeline).from_pretrained(path)
+        new_pipeline = PointCloudTo3DPipeline()
         new_pipeline.__dict__ = pipeline.__dict__
         args = pipeline._pretrained_args
 
@@ -60,7 +60,7 @@ class PointcloudTo3DPipeline(TrellisImageTo3DPipeline):
 
             coords = torch.argwhere(voxel_tensor)[:, [0, 2, 3, 4]].int()
 
-            mapping["voxels"] = convert_voxels_to_pointcloud(voxels)
+            mapping["voxels"] = convert_voxels_to_pc(voxels)
             mapping["transform"] = transformation_info
 
         return coords, mapping

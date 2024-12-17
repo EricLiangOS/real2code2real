@@ -1,1 +1,1 @@
-from .pointcloud_to_3d import PointcloudTo3DPipeline
+from .point_cloud_to_3d import PointCloudTo3DPipeline
