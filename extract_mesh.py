@@ -20,14 +20,14 @@ class bcolors:
 parser = ArgumentParser("Get masks and mesh extracts of objects within a scene")
 
 parser.add_argument("--source_path", "-s", required=True, type = str)
-parser.add_argument("--model_path", "-m", required=True, type=str)
+parser.add_argument("--model_path", "-m", type=str, default=None)
 parser.add_argument("--dataset_size", default = 1100, type = int)
 
 
 args = parser.parse_args(sys.argv[1:])
 
-os.makedirs(args.model_path, exist_ok=True)
 if args.model_path:
+    os.makedirs(args.model_path, exist_ok=True)
     base_output_dir = os.path.join(args.model_path, time.strftime("%Y%m%d-%H%M%S"))
 
 base_dir = args.source_path
@@ -41,13 +41,11 @@ background_masks_dir = os.path.join(base_dir, "images")
 # Reduce the dataset size
 if not os.path.isdir(input_dir):
     print(bcolors.OKCYAN + f"Making reduced dataset directory at {input_dir}" + bcolors.ENDC)
-    frame_correspondance = copy_dataset(raw_dir, input_dir, args.dataset_size)
+    frame_correspondance = copy_dataset(raw_dir, input_dir, min(args.dataset_size, len(os.listdir(raw_dir))))
     copy_dataset(raw_depth_dir, depth_dir, args.dataset_size)
 
     categories = ["frameTimestamps", "poses", "perFrameIntrinsicCoeffs"]
     rewrite_json(os.path.join(base_dir, "metadata.json"), os.path.join(base_dir, "new_metadata.json"), frame_correspondance, categories)
-
-    
 
 print(bcolors.OKGREEN + f"Reduced dataset successfully created at {input_dir}" + bcolors.ENDC)
 

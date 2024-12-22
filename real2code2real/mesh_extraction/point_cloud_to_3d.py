@@ -76,6 +76,7 @@ class PointCloudTo3DPipeline(TrellisImageTo3DPipeline):
         slat_sampler_params: dict = {},
         formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
         preprocess_image: bool = True,
+        mode: Literal['stochastic', 'multidiffusion'] = 'stochastic',
     ) -> dict:
 
         torch.manual_seed(seed)
@@ -85,19 +86,13 @@ class PointCloudTo3DPipeline(TrellisImageTo3DPipeline):
                 images[i] = self.preprocess_image(images[i])
             
         coords, mapping = self.get_sparse_structure(input_path)
-        
-        feats = []
 
-        for image in images:
-            cond = self.get_cond([image])
+        cond = self.get_cond(images)
+        cond['neg_cond'] = cond['neg_cond'][:1]
 
+        slat_steps = {**self.slat_sampler_params, **slat_sampler_params}.get('steps')
+        with self.inject_sampler_multi_image('slat_sampler', len(images), slat_steps, mode=mode):
             slat = self.sample_slat(cond, coords, slat_sampler_params)
-            feats.append(slat.feats)
-        
-        total_feats = torch.stack(feats, dim=0)
-        total_feats = torch.mean(total_feats, dim=0)
 
-        slat_average = sp.SparseTensor(total_feats, coords)
-        output = self.decode_slat(slat_average, formats)
+        return self.decode_slat(slat, formats), mapping
 
-        return output, mapping

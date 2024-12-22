@@ -5,19 +5,33 @@ os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default
                                             # Recommended to set to 'native' if run only once.
 
 from argparse import ArgumentParser
-import imageio
 from PIL import Image
 import open3d as o3d
-import trimesh
 import numpy as np
-import torch
 import copy
+from scipy.spatial.transform import Rotation
 
 from submodules.TRELLIS.trellis.utils import render_utils, postprocessing_utils
 
-def get_voxels(ply_path, grid_size=64, padding=5):
-    pcd = o3d.io.read_point_cloud(ply_path)
+def get_number(word):
+    numbers = ""
+    for char in word:
+        if char.isnumeric():
+            numbers += char
     
+    return int(numbers)
+
+def get_voxels(ply_path, grid_size=64, padding=0):
+    pcd = o3d.io.read_point_cloud(ply_path)
+
+    obb = pcd.get_oriented_bounding_box()
+
+    # Compute the rotation matrix to align the OBB with the axes
+    R = obb.R.T  # Transpose of the rotation matrix to align with the axes
+
+    # Rotate the mesh to align with the axes
+    pcd.rotate(R, center=np.zeros(3))
+
     points = np.asarray(pcd.points)
     
     min_bound = points.min(axis=0)
@@ -42,16 +56,33 @@ def get_voxels(ply_path, grid_size=64, padding=5):
             0 <= z < grid_size):
             voxel_grid[x, y, z] = 1.0
 
-    voxel_grid = fill_voxel_holes(voxel_grid)
-
     transformation_info = {
         'min_bound': min_bound,
         'max_bound': max_bound,
         'scale_factor': scale_factor,
-        'padding_offset': padding_offset
+        'padding_offset': padding_offset,
+        'rotation_matrix': R
     }
 
     return voxel_grid, transformation_info
+
+
+def transform_voxel_to_pcd(mesh, transformation_info):
+    
+    translation_vector = np.array([-transformation_info['padding_offset']] * 3)
+    mesh.translate(translation_vector)
+
+    min_bound = transformation_info['min_bound']
+    scale_factor = transformation_info['scale_factor']
+    
+    mesh.scale(1 / scale_factor, center=np.zeros(3))
+    
+    mesh.translate(min_bound)
+
+    R = transformation_info['rotation_matrix']
+    mesh.rotate(R.T, center=np.zeros(3))
+
+    return mesh
 
 def convert_voxels_to_pc(grid):
 
@@ -91,6 +122,89 @@ def fill_voxel_holes(voxel_grid, threshold = 15):
     
     return filled_voxel_grid
 
+def preprocess_point_cloud(pcd, voxel_size):
+    pcd_down = pcd.voxel_down_sample(voxel_size)
+    pcd_down.estimate_normals(
+        o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2, max_nn=30))
+    pcd_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+        pcd_down,
+        o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5, max_nn=100))
+    return pcd_down, pcd_fpfh
+
+def execute_global_registration(source_down, target_down, source_fpfh,
+                                target_fpfh, voxel_size):
+    distance_threshold = voxel_size * 1.5
+    print(":: RANSAC registration on downsampled point clouds.")
+    print("   Since the downsampling voxel size is %.3f," % voxel_size)
+    print("   we use a liberal distance threshold %.3f." % distance_threshold)
+    result = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+        source_down, target_down, source_fpfh, target_fpfh, True,
+        distance_threshold,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+        3, [
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(
+                0.9),
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(
+                distance_threshold)
+        ], o3d.pipelines.registration.RANSACConvergenceCriteria(100000, 0.999))
+    return result
+
+def get_alignment_transformation(target, source):
+
+    voxel_size = 0.05
+
+    source_down, source_fpfh = preprocess_point_cloud(source, voxel_size)
+    target_down, target_fpfh = preprocess_point_cloud(target, voxel_size)
+    result_ransac = execute_global_registration(source_down, target_down,
+                                                source_fpfh, target_fpfh,
+                                                voxel_size)
+
+    distance_threshold = voxel_size * 0.4
+
+    result = o3d.pipelines.registration.registration_icp(
+        source_down, target_down, distance_threshold, result_ransac.transformation,
+        o3d.pipelines.registration.TransformationEstimationPointToPlane())
+    
+    return result.transformation
+
+def align_pcd(point_clouds):
+
+    aligned_point_clouds = []
+    target = point_clouds[0]
+
+    for i, source in enumerate(point_clouds):
+        if i != 0:
+            transformation = get_alignment_transformation(target, source)
+            source.transform(transformation)
+
+        aligned_point_clouds.append(source) 
+    
+    return aligned_point_clouds
+
+def align_scale_pcd(source_pcd, target_pcd):
+
+    target_obb = target_pcd.get_oriented_bounding_box()
+    target_extents = np.sort(target_obb.extent)
+
+    source_obb = source_pcd.get_oriented_bounding_box()
+    source_extents = np.sort(source_obb.extent)
+
+    scale_factor = np.mean(target_extents / source_extents)
+    source_pcd.scale(scale_factor, center=source_obb.center)
+
+    scaled_source_obb = source_pcd.get_oriented_bounding_box()
+
+    translation = target_obb.center - scaled_source_obb.center
+    source_pcd.translate(translation)
+
+    source_extents = scaled_source_obb.extent
+
+    # Compile the transformation
+    transformation = np.eye(4)
+    transformation[:3, 3] = translation
+
+    return scale_factor, transformation
+
 # Transforms aligning_obj to align with fixed_obj
 def align_bounding_boxes(aligning_obj, fixed_obj):
 
@@ -103,31 +217,38 @@ def align_bounding_boxes(aligning_obj, fixed_obj):
     fixed_obj_extent = fixed_obj_bbox.get_extent()
  
     scale_factors = fixed_obj_extent / aligned_obj_extent
+    scale_factors = sum(scale_factors)/len(scale_factors)
+
     fixed_obj_center = fixed_obj_bbox.get_center()
     obj_center = aligned_obj_bbox.get_center()
     translation = fixed_obj_center - obj_center
     
-    aligned_obj.scale(sum(scale_factors)/len(scale_factors), obj_center)
     
-    aligned_obj.translate(translation)
-    
-    return aligned_obj
+    return scale_factors, translation
 
-def reverse_mesh(mesh, transformation_info):
-    
-    translation_vector = np.array([-transformation_info['padding_offset']] * 3)
-    mesh.translate(translation_vector)
+def get_pcd_alignment_rotation(source, target):
 
-    min_bound = transformation_info['min_bound']
-    scale_factor = transformation_info['scale_factor']
-    
-    mesh.scale(1 / scale_factor, center=np.zeros(3))
-    
-    translation_vector = min_bound
-    mesh.translate(translation_vector)
-        
-    return mesh
+    rotations = [0, np.pi/2, np.pi, 3*np.pi/2]
 
+    best_distance = 1E9
+    best_rotation = None
+
+    for x in rotations:
+        for y in rotations:
+            for z in rotations:
+                source_copy = copy.deepcopy(source)
+                R = source_copy.get_rotation_matrix_from_xyz((x, y, z))
+                source_copy.rotate(R, center=source_copy.get_center())
+
+                v = target.compute_point_cloud_distance(source_copy)
+                v = np.square(np.asarray(v))
+                average_distance = np.mean(v)
+
+                if average_distance < best_distance:
+                    best_distance = average_distance
+                    best_rotation = R
+    
+    return best_rotation
 
 def save_voxel(voxels, voxels_path):
     grid = voxels[0][0].detach().cpu().numpy()
@@ -149,83 +270,32 @@ def save_voxel(voxels, voxels_path):
                 # Add voxel object to grid
                 voxel_grid.add_voxel(voxel)
     o3d.io.write_voxel_grid(voxels_path, voxel_grid)
-
-def obb_from_axis(points: np.ndarray, axis_idx: int):
-    """get the oriented bounding box from a set of points and a pre-defined axis"""
-    # Compute the centroid, points shape: (N, 3)
-    centroid = np.mean(points, axis=0)
-    # Align points with the fixed axis idx ([1, 0, 0]), so ignore x-coordinates
-    if axis_idx == 0:
-        points_aligned = points[:, 1:]
-        axis_1 = np.array([1, 0, 0])
-    elif axis_idx == 1:
-        points_aligned = points[:, [0, 2]]
-        axis_1 = np.array([0, 1, 0])
-    elif axis_idx == 2:
-        points_aligned = points[:, :2]
-        axis_1 = np.array([0, 0, 1])
-    else:  
-        raise ValueError(f"axis_idx {axis_idx} not supported!") 
-
-    # Compute PCA on the aligned points
-    points_centered = points_aligned - np.mean(points_aligned, axis=0)  
-    cov = np.cov(points_centered.T)
-    _, vh = np.linalg.eig(cov)
-    axis_2, axis_3 = vh[:, 0], vh[:, 1] # 2D!!
-    # axis_2, axis_3 = vh[0], vh[1] # 2D!! 
-    axis_2, axis_3 = np.round(axis_2, 1), np.round(axis_3, 1)  
-    x2, y2 = axis_2
-    x3, y3 = axis_3 
-    
-    if sum(axis_2 < 0) == 2 or (sum(axis_2 < 0) == 1 and sum(axis_2 == 0) == 1):
-        axis_2 = -axis_2
-    if sum(axis_3 < 0) == 2 or (sum(axis_3 < 0) == 1 and sum(axis_3 == 0) == 1):
-        axis_3 = -axis_3
-
-    # remove -0
-    axis_2 = np.array([0. if x == -0. else x for x in axis_2])
-    axis_3 = np.array([0. if x == -0. else x for x in axis_3]) 
-    if axis_idx == 0:
-        evec = np.array([
-            axis_1,
-            [0, axis_2[0], axis_2[1]],
-            [0, axis_3[0], axis_3[1]]
-            ]).T
-    elif axis_idx == 1:
-        evec = np.array([
-            [axis_2[0], 0, axis_2[1]],
-            axis_1,
-            [axis_3[0], 0, axis_3[1]]
-            ]).T 
-    elif axis_idx == 2:
-        evec = np.array([
-            [axis_2[0], axis_2[1], 0],
-            [axis_3[0], axis_3[1], 0],
-            axis_1,
-            ]).T 
-    # Use these axes to find the extents of the OBB
-    # # Project points onto these axes 
-    all_centered = points - centroid # (N, 3)
-    projection = all_centered @ evec # (N, 3) @ (3, 3) -> (N, 3)
-
-    # Find min and max projections to get the extents
-    _min = np.min(projection, axis=0)
-    _max = np.max(projection, axis=0)
-    extent = (_max - _min) # / 2 -> o3d takes full length
-    # Construct the OBB using the centroid, axes, and extents 
  
-    return dict(center=centroid, R=evec, extent=extent)
+def reverse_transformation(source_object, reference_object, mapping):
 
-def get_object(output, output_path, object_name="", mapping = {}):
+    R = source_object.get_rotation_matrix_from_xyz((np.pi/2, 0, 0))
+    source_object.rotate(R, center=(0, 0, 0))
+
+    voxel_pcd = mapping["voxels"]
+    scale_factor, translation = align_bounding_boxes(aligning_obj=reference_object, fixed_obj=voxel_pcd)
+
+    source_object.scale(scale_factor, center=source_object.get_center())
+    source_object.translate(translation)
+
+    source_object = transform_voxel_to_pcd(source_object, mapping["transform"])
+
+    return source_object
+
+def get_object(object_output, output_path, object_name=""):
     if object_name:
         object_name += "_"
         
     texture_path = os.path.join(output_path, f"{object_name}texture.png")
     mesh_path = os.path.join(output_path, f"{object_name}mesh.obj")
-
+    
     obj = postprocessing_utils.to_glb(
-        output['gaussian'][0],
-        output['mesh'][0],
+        object_output['gaussian'][0],
+        object_output['mesh'][0],
         # Optional parameters
         simplify=0.1,          # Ratio of triangles to remove in the simplification process
         texture_size=1024,      # Size of the texture used for the GLB
@@ -233,19 +303,4 @@ def get_object(output, output_path, object_name="", mapping = {}):
 
     obj.export(mesh_path)
     os.rename(os.path.join(output_path, "material_0.png"), texture_path)
-
-    print("Transforming object back to original position")
-    if "voxels" in mapping and "transform" in mapping:
-        transform_obj = o3d.io.read_triangle_mesh(mesh_path)
-        R = transform_obj.get_rotation_matrix_from_xyz((np.pi/2, 0, 0))
-        transform_obj.rotate(R, center=(0, 0, 0))
-
-        voxel_pcd = mapping["voxels"]
-
-        transform_obj = align_bounding_boxes(aligning_obj=transform_obj, fixed_obj=voxel_pcd)
-        transform_obj = reverse_mesh(transform_obj, mapping["transform"])
-
-        o3d.io.write_triangle_mesh(mesh_path, transform_obj)
-
-
 

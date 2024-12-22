@@ -1,1 +1,2 @@
 from .point_cloud_to_3d import PointCloudTo3DPipeline
+from .spatialize_mesh import process_rgbd_directory, align_mesh
