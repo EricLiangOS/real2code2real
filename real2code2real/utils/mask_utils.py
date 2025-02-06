@@ -81,6 +81,10 @@ def get_masks(images_dir, object_prompts):
         prompt = np.array(prompts[1::], dtype=np.float32)
         labels = np.array([1] * len(prompt), np.int32)
 
+        for i, (x, y) in enumerate(prompt):
+            if x < 0 and y < 0:
+                labels[i] = -1
+
         if prompts[0] == 0:
             _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
                 inference_state=inference_state,

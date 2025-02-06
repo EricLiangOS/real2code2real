@@ -1,69 +1,37 @@
+
 import os
-import json
-import numpy as np
+# os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
+os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default is 'auto'.
+                                            # 'auto' is faster but will do benchmarking at the beginning.
+                                            # Recommended to set to 'native' if run only once.
 
-os.environ["EGL_PLATFORM"] = "surfaceless"
-import open3d as o3d
+from argparse import ArgumentParser
 from PIL import Image
-from scipy.spatial.transform import Rotation as R
+from real2code2real.mesh_extraction import PointCloudTo3DPipeline, target_matching, pairwise_matching
+from real2code2real.utils import generate_utils
+import open3d as o3d
+import numpy as np
+import copy
+import logging
 
-def convert_to_rgba(image):
-    rgba_image = np.zeros((image.shape[0], image.shape[1], 4), dtype=image.dtype)
+os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
-    rgba_image[:, :, :3] = image
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
 
-    rgba_image[:, :, 3] = 255
+def get_pipeline():
+    pipeline = PointCloudTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-large")
 
-    # Set the alpha channel to 0 (fully transparent) for black pixels
-    black_pixels = np.all(image == [0, 0, 0], axis=-1)
-    rgba_image[black_pixels, 3] = 0
-
-    return rgba_image 
-
-def create_camera_frustum(intrinsic_matrix, extrinsic_matrix, width, height, scale=0.1):
-    fx, fy = intrinsic_matrix[0, 0], intrinsic_matrix[1, 1]
-    cx, cy = intrinsic_matrix[0, 2], intrinsic_matrix[1, 2]
-
-    # Define the frustum corners in the camera coordinate system
-    corners = np.array([
-        [0, 0, 0],
-        [cx / fx, cy / fy, 1],
-        [-cx / fx, cy / fy, 1],
-        [-cx / fx, -cy / fy, 1],
-        [cx / fx, -cy / fy, 1]
-    ]) * scale
-
-    # Transform the corners to the world coordinate system
-    corners = np.dot(extrinsic_matrix[:3, :3], corners.T).T + extrinsic_matrix[:3, 3]
-
-    # Create lines connecting the corners
-    lines = [
-        [0, 1], [0, 2], [0, 3], [0, 4],
-        [1, 2], [2, 3], [3, 4], [4, 1]
-    ]
-
-    colors = [[1, 0, 0] for _ in range(len(lines))]
-
-    line_set = o3d.geometry.LineSet()
-    line_set.points = o3d.utility.Vector3dVector(corners)
-    line_set.lines = o3d.utility.Vector2iVector(lines)
-    line_set.colors = o3d.utility.Vector3dVector(colors)
-
-    return line_set
-
-def position_and_scale_object(frames, obj):
-    poses = np.array([frames[frame][1][:3] for frame in frames])
-    center = np.mean(poses, axis=0)
-
-    obj.translate(center)
-
-    distances = np.linalg.norm(poses - center, axis=1)
-    radius = np.max(distances)
-
-    scale_factor = 0.5 * radius / np.max(obj.get_max_bound() - obj.get_min_bound())
-    obj.scale(scale_factor, center)
-
-    return obj
+    return pipeline
 
 def get_number(word):
     numbers = ""
@@ -73,64 +41,68 @@ def get_number(word):
     
     return int(numbers)
 
-image_dir = "/User/ehliang/Downloads/drawer_input_2"
-object_path = "/User/ehliang/Downloads/multiview_drawer_2_mesh.obj"
-# object_path = "/store/real/ehliang/data/home_kitchen_3/textured_output.obj"
-texture_path = "/User/ehliang/Downloads/multiview_drawer_2_texture.png"
-json_path = "/User/ehliang/Downloads/new_metadata.json"
+# Generates an object from multiview images, saves the mesh and rendered images, and returns the relevant metadata
+def generate(multiview_path, output_path, object_name, pipeline, sparse_path=None, generated_images=200):
 
-frame_names = [
-        p for p in os.listdir(image_dir)
+    pipeline.cuda()
+
+    images = []
+    frame_names = [
+        p for p in os.listdir(multiview_path)
     ]
-    # .split("_")[1])
-frame_names.sort(key=lambda p: get_number(os.path.splitext(p)[0]))
 
-frames = {}
+    frame_names.sort(key=lambda p: get_number(os.path.splitext(p)[0]))
+    for frame_name in frame_names:
+        images.append(Image.open(os.path.join(multiview_path, frame_name)))
 
-for frame in frame_names:
-    image = Image.open(os.path.join(image_dir, frame))
-    frames[int(frame.split(".")[0])] = [image]
-    
-with open(json_path, 'r') as file:
-    data = json.load(file)
+    if sparse_path:
+        # Use mapping if we have accurate pcd to transform the mesh back to
+        output, mapping = pipeline.run_sparse_structure(
+            images,
+            input_path=sparse_path,
+            seed=1,
+        )
+    elif len(images) == 1:
+        output = pipeline.run(
+            images[0],
+            seed=1,
+            # Optional parameters
+            sparse_structure_sampler_params={
+                "steps": 20,
+                "cfg_strength": 15,
+            },
+            slat_sampler_params={
+                "steps": 20,
+                "cfg_strength": 15,
+            }
+        )
+    else:
+        output = pipeline.run_multi_image(
+            images,
+            seed=1,
+            # Optional parameters
+            sparse_structure_sampler_params={
+                "steps": 40,
+                "cfg_strength": 7.5,
+            },
+            slat_sampler_params={
+                "steps": 40,
+                "cfg_strength": 3,
+            }
+        )
 
-for frame in frames:
-    frames[frame].append(data["poses"][frame])
-    frames[frame].append(data["perFrameIntrinsicCoeffs"][frame])
+    generate_utils.save_object(output, output_path, object_name)
 
-obj = o3d.io.read_triangle_mesh(object_path, True)
+    H, W = images[0].size[1], images[0].size[0]
+    mesh_data = generate_utils.prepare_mesh_data(output, H, W, generated_images, output_path, object_name)
 
-obj = position_and_scale_object(frames, obj)
+    return mesh_data
 
-texture = o3d.io.read_image(texture_path)
-# obj.textures = [texture]
-obj.compute_vertex_normals()
+pipeline = get_pipeline()
+object_name = "object_4"
+pcd_path = "/store/real/ehliang/multiview_outputs/kitchen_static_4/10_img_100_steps_7_sparse_3_latent/object_4/state_1/object_4_state_1_ground_truth_pcd.ply"
+# pcd_path = f"/home/ehliang/real2code2real/outputs/kitchen_static_1/{object_name}/state_1/{object_name}_state_1_ground_truth_pcd.ply"
+output_path = "sparse"
+multiview_path = f"/store/real/ehliang/multiview_data/kitchen_static_4/20_img_pruned/object_4/generation_state"
 
-width, height = image.size
-
-mat_mesh =  o3d.visualization.rendering.MaterialRecord()
-mat_mesh.albedo_img = texture
-mat_mesh.shader = "defaultUnlit"
-
-geometries = [obj]
-
-for frame in frames:
-    intrinsic_matrix = np.array([[frames[frame][2][0], 0, frames[frame][2][3]], 
-                                 [0, frames[frame][2][1], frames[frame][2][2]], 
-                                 [0, 0, 1]])
-    pose = frames[frame][1]
-    translation = pose[:3]
-    quaternion = pose[3:]
-    rotation_matrix = R.from_quat(quaternion).as_matrix()
-    extrinsic_matrix = np.eye(4)
-    extrinsic_matrix[:3, :3] = rotation_matrix
-    extrinsic_matrix[:3, 3] = translation
-
-    frustum = create_camera_frustum(intrinsic_matrix, extrinsic_matrix, width, height)
-    geometries.append(frustum)
-
-o3d.visualization.draw_geometries(geometries)
-
-print("Simulating capture...")
-# simulate_capture(frames, renderer)
-
+mesh_data = generate(multiview_path, output_path, object_name, pipeline, generated_images=200)

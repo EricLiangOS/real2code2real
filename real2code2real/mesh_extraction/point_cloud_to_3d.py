@@ -6,7 +6,7 @@ from PIL import Image
 from submodules.TRELLIS.trellis.modules import sparse as sp
 from submodules.TRELLIS.trellis.pipelines import samplers
 from submodules.TRELLIS.trellis.pipelines import TrellisImageTo3DPipeline
-from ..utils.generate_utils import get_voxels, convert_voxels_to_pc
+from ..utils.sparse_utils import get_voxels, convert_voxels_to_pcd
 
 class PointCloudTo3DPipeline(TrellisImageTo3DPipeline):
     def __init__(
@@ -42,37 +42,31 @@ class PointCloudTo3DPipeline(TrellisImageTo3DPipeline):
 
         return new_pipeline
 
-    def get_sparse_structure(self, input_path, sparse_structure_sampler_params: dict = {},):
-
-        input_type = input_path.split(".")[1]
+    def get_sparse_structure(self, input_path):
 
         mapping = {}
-        if input_type == "png":
-            main_image = self.preprocess_image(main_image)
-            sparse_cond = self.get_cond([main_image])
-            coords = self.sample_sparse_structure(sparse_cond, 1, sparse_structure_sampler_params)
 
-        else:
-            voxels, transformation_info = get_voxels(input_path)
+        voxels, transformation_info = get_voxels(input_path)
 
-            voxel_tensor = torch.tensor(voxels, dtype=torch.float32)
-            voxel_tensor = voxel_tensor.unsqueeze(0).unsqueeze(0).to(self.device)
+        voxel_tensor = torch.tensor(voxels, dtype=torch.float32)
+        print(voxel_tensor.shape)
+        
+        voxel_tensor = voxel_tensor.unsqueeze(0).unsqueeze(0).to(self.device)
 
-            coords = torch.argwhere(voxel_tensor)[:, [0, 2, 3, 4]].int()
+        coords = torch.argwhere(voxel_tensor)[:, [0, 2, 3, 4]].int()
 
-            mapping["voxels"] = convert_voxels_to_pc(voxels)
-            mapping["transform"] = transformation_info
+        mapping["voxels"] = convert_voxels_to_pcd(voxels)
+        mapping["transform"] = transformation_info
 
         return coords, mapping
 
     @torch.no_grad()
-    def run(
+    def run_sparse_structure(
         self,
         images: List[Image.Image],
         num_samples: int = 1,
         input_path: str = None,
         seed: int = 42,
-        sparse_structure_sampler_params: dict = {},
         slat_sampler_params: dict = {},
         formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
         preprocess_image: bool = True,
@@ -95,4 +89,5 @@ class PointCloudTo3DPipeline(TrellisImageTo3DPipeline):
             slat = self.sample_slat(cond, coords, slat_sampler_params)
 
         return self.decode_slat(slat, formats), mapping
+
 
