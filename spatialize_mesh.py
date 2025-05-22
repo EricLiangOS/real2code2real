@@ -7,7 +7,7 @@ import Imath
 import numpy as np
 import json
 from scipy.spatial.transform import Rotation
-from real2code2real.utils import generate_utils
+from real2code2real.utils import align_utils
 from submodules.TRELLIS.trellis.utils import render_utils, postprocessing_utils
 import torch
 import math

@@ -1,2 +1,2 @@
-from .point_cloud_to_3d import PointCloudTo3DPipeline
+# from .point_cloud_to_3d import PointCloudTo3DPipeline
 from .object_matching import target_matching, pairwise_matching

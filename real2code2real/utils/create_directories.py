@@ -1,7 +1,7 @@
 import os
 
-input_dir = "/store/real/ehliang/multiview_data/kitchen_static_5/20_img"
-num_objects = 8
+input_dir = "/store/real/ehliang/multiview_data/kitchen_synthesizer_2/20_img"
+num_objects = 5
 num_states = 1
 
 os.makedirs(input_dir, exist_ok=True)

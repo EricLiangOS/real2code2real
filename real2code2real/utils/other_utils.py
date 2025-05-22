@@ -2,7 +2,7 @@ import open3d as o3d
 import numpy as np
 import copy
 import os
-from . import generate_utils
+from . import align_utils
 
 def get_voxels(ply_path, grid_size=64, padding=0):
     pcd = o3d.io.read_point_cloud(ply_path)
@@ -278,8 +278,8 @@ def align_pairwise_matched_points(frame_data, frame_matches, alignment_frames):
         s_coords = frame_matches[frame][1]
         t_coords = frame_matches[frame][0]
 
-        s_matched = generate_utils.create_points_from_coordinates(frame_data, frame, s_coords)
-        t_matched = generate_utils.create_points_from_coordinates(frame_data, prev_frame, t_coords)
+        s_matched = align_utils.create_points_from_coordinates(frame_data, frame, s_coords)
+        t_matched = align_utils.create_points_from_coordinates(frame_data, prev_frame, t_coords)
 
         t_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(t_matched))
         t_pcd.transform(transformations[prev_frame][1])
@@ -291,9 +291,9 @@ def align_pairwise_matched_points(frame_data, frame_matches, alignment_frames):
             prev_frame = frame
             continue
 
-        s_matched, t_matched = generate_utils.remove_zero_rows(s_matched, t_matched)
+        s_matched, t_matched = align_utils.remove_zero_rows(s_matched, t_matched)
 
-        scale, T = generate_utils.find_p2p_transformation(s_matched, t_matched)
+        scale, T = align_utils.find_p2p_transformation(s_matched, t_matched)
         transformations[frame] = [scale, T]
         
         prev_frame = frame
@@ -315,7 +315,7 @@ def pairwise_matching(gt_data, output_path, resize_dimensions):
 
     for frame in alignment_frames:
 
-        pcd = generate_utils.create_pcd_from_frame(gt_data, frame)
+        pcd = align_utils.create_pcd_from_frame(gt_data, frame)
         pcd.transform(transformations[frame][1])
 
         o3d.io.write_point_cloud("outputs/aligned_points/aligned_pcd_{:06}.ply".format(frame), pcd)
@@ -380,7 +380,7 @@ def remove_small_clusters(point_cloud, eps=0.2, min_points=10):
 
 def process_rgbd_directory(images_dir, depth_dir, metadata_path, sample_size_per_image=1000, output_path=None):
 
-    data = generate_utils.prepare_record3d_data(images_dir, metadata_path, depth_dir)
+    data = align_utils.prepare_record3d_data(images_dir, metadata_path, depth_dir)
 
     frames = data["frames"]
     intrinsics = data["intrinsics"]

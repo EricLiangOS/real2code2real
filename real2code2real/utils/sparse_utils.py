@@ -2,7 +2,7 @@ import open3d as o3d
 import numpy as np
 import copy
 import os
-from . import generate_utils
+from . import align_utils
 
 def get_voxels(ply_path, grid_size=64, padding=0):
     pcd = o3d.io.read_point_cloud(ply_path)

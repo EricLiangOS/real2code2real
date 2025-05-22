@@ -8,13 +8,65 @@ from submodules.SuperGluePretrainedNetwork.models.matching import Matching
 from submodules.SuperGluePretrainedNetwork.models.utils import (process_resize, VideoStreamer,
                                              make_matching_plot_fast, frame2tensor)
 
+
+def crop_image(mask_img, raw_img):
+    bbox = np.argwhere(mask_img > 0.8 * 255)
+    bbox = (
+        np.min(bbox[:, 1]),
+        np.min(bbox[:, 0]),
+        np.max(bbox[:, 1]),
+        np.max(bbox[:, 0]),
+    )
+    center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+    size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
+    size = int(size * 1.2)
+    bbox = (
+        int(center[0] - size // 2),
+        int(center[1] - size // 2),
+        int(center[0] + size // 2),
+        int(center[1] + size // 2),
+    )
+    # Make sure the bounding box is within the image
+    bbox = (
+        max(0, bbox[0]),
+        max(0, bbox[1]),
+        min(raw_img.shape[1], bbox[2]),
+        min(raw_img.shape[0], bbox[3]),
+    )
+    # Get the masked cropped image used for superglue
+    crop_img = raw_img.copy()
+    mask_bool = mask_img > 0
+    crop_img[~mask_bool] = 0
+    crop_img = crop_img[bbox[1] : bbox[3], bbox[0] : bbox[2]]
+
+    return crop_img, bbox
+
+
 def prepare_image(image, resize_dimensions):
     gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     w, h = gray_image.shape[1], gray_image.shape[0]
-    w_new, h_new = process_resize(w, h, resize_dimensions)
 
-    gray_image = cv2.resize(gray_image, (w_new, h_new), interpolation=cv2.INTER_AREA)
+    if resize_dimensions != -1:
+        target_w, target_h = process_resize(w, h, resize_dimensions)
+
+        # Resize image preserving aspect ratio:
+        # Compute scaling factors to fit within target dimensions.
+        scale = min(target_w / w, target_h / h)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        resized_image = cv2.resize(gray_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        # Compute padding to center the image
+        delta_w = target_w - new_w
+        delta_h = target_h - new_h
+        left = delta_w // 2
+        right = delta_w - left
+        top = delta_h // 2
+        bottom = delta_h - top
+
+        # Add padding (using a constant value, here 0 for black padding)
+        gray_image = cv2.copyMakeBorder(resized_image, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
 
     return gray_image
 
@@ -36,7 +88,7 @@ def pairwise_matching(data, resize_dimensions, output_dir = None, alignment_fram
     config = {
         'superpoint': {
             'nms_radius': 4,
-            'keypoint_threshold': 0.005,
+            'keypoint_threshold': 0.0025,
             'max_keypoints': -1
         },
         'superglue': {
@@ -151,7 +203,7 @@ def pairwise_matching(data, resize_dimensions, output_dir = None, alignment_fram
     torch.set_grad_enabled(True)
     return all_matches
 
-def target_matching(target, images, resize_dimensions, output_path = None, max_matches = 15):
+def target_matching(target, images, resize_dimensions, output_path = None, max_matches = 150):
     torch.set_grad_enabled(False)
 
     show_keypoints = True
@@ -160,13 +212,13 @@ def target_matching(target, images, resize_dimensions, output_path = None, max_m
     config = {
         'superpoint': {
             'nms_radius': 4,
-            'keypoint_threshold': 0.005,
+            'keypoint_threshold': 0.0025,
             'max_keypoints': -1
         },
         'superglue': {
             'weights': "indoor",
             'sinkhorn_iterations': 20,
-            'match_threshold': 0.7,
+            'match_threshold': 0.25,
         }
     }
 
@@ -250,13 +302,17 @@ def target_matching(target, images, resize_dimensions, output_path = None, max_m
             path=output_path, show_keypoints=show_keypoints, small_text=small_text)
             
     for i in range(len(best_matches[0])):
-        new_x0 = best_matches[0][i][0] *  target.shape[1] / resize_dimensions[0]
-        new_y0 = best_matches[0][i][1] * target.shape[0] / resize_dimensions[1]
-        best_matches[0][i] = [int(new_x0), int(new_y0)]
+        if resize_dimensions != -1:
+            new_x0 = best_matches[0][i][0] *  target.shape[1] / resize_dimensions[0]
+            new_y0 = best_matches[0][i][1] * target.shape[0] / resize_dimensions[1]
+            best_matches[0][i] = [int(new_x0), int(new_y0)]
 
-        new_x1 = best_matches[1][i][0] * W1/ resize_dimensions[0]
-        new_y1 = best_matches[1][i][1] * H1 / resize_dimensions[1]
-        best_matches[1][i] = [int(new_x1), int(new_y1)]
+            new_x1 = best_matches[1][i][0] * W1/ resize_dimensions[0]
+            new_y1 = best_matches[1][i][1] * H1 / resize_dimensions[1]
+            best_matches[1][i] = [int(new_x1), int(new_y1)]
+        else:
+            best_matches[0][i] = [int(best_matches[0][i][0]), int(best_matches[0][i][1])]
+            best_matches[1][i] = [int(best_matches[1][i][0]), int(best_matches[1][i][1])]
 
     torch.set_grad_enabled(True)
         

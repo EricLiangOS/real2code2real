@@ -7,8 +7,9 @@ os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default
 
 from argparse import ArgumentParser
 from PIL import Image
-from real2code2real.mesh_extraction import PointCloudTo3DPipeline, target_matching, pairwise_matching
-from real2code2real.utils import generate_utils
+from real2code2real.mesh_extraction.point_cloud_to_3d import PointCloudTo3DPipeline
+from real2code2real.mesh_extraction import target_matching, pairwise_matching
+from real2code2real.utils import align_utils, data_utils
 import open3d as o3d
 import numpy as np
 import copy
@@ -17,6 +18,7 @@ import wandb
 import time
 import cv2
 import json
+import pickle
 
 o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
 os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
@@ -82,40 +84,67 @@ def generate(images, output_path, object_name, pipeline, **kwargs):
             slat_sampler_params=slat_params,
         )
 
-    generate_utils.save_object(output, output_path, object_name)
-    generate_utils.save_object(output, output_path, object_name, is_glb=True)
+    data_utils.save_object(output, output_path, object_name)
+    data_utils.save_object(output, output_path, object_name, is_glb=True)
 
     H, W = images[0].size[1], images[0].size[0]
-    mesh_data = generate_utils.prepare_mesh_data(output, H, W, generated_images, output_path, object_name)
+    mesh_data = data_utils.prepare_mesh_data(output, H, W, generated_images, output_path, object_name)
 
     return mesh_data
 
-def align_target_matched_points(s_data, t_data, matches):
+def align_target_matched_points(s_data, t_data, matches, output_path):
+
+    pickle_path = os.path.join(output_path, "matched_points.pkl")
+    if os.path.exists(pickle_path):
+        with open(pickle_path, "rb") as f:
+            matches_3d = pickle.load(f)
+    else:
+        matches_3d = {}
+        for t_frame in matches:
+            t_coords, s_coords = matches[t_frame][0]
+            s_frame = matches[t_frame][1]
+            s_matched = align_utils.coordinates_to_3d(s_data, s_frame, s_coords, os.path.join(output_path, f"{t_frame}_visual0.png"))
+            t_matched = align_utils.coordinates_to_3d(t_data, t_frame, t_coords, os.path.join(output_path, f"{t_frame}_visual1.png"))
+            s_matched, t_matched = align_utils.remove_zero_rows(s_matched, t_matched)
+            print(f"{matches[t_frame][0][1].shape[0] - s_matched.shape[0]} points removed")
+            matches_3d[t_frame] = [[t_matched, s_matched], s_frame]
+            
+        with open(pickle_path, "wb") as f:
+            pickle.dump(matches_3d, f)
 
     s_matched_all = []
     t_matched_all = []
 
-    for t_frame in matches:
-        t_coords, s_coords = matches[t_frame][0]
-        s_frame = matches[t_frame][1]
+    matched_points_paths = []
+    plotted_points_paths = []
+    object_name = os.path.basename(os.path.dirname(output_path))
+    state = os.path.basename(output_path)
 
-        s_matched = generate_utils.create_points_from_coordinates(s_data, s_frame, s_coords)
-        t_matched = generate_utils.create_points_from_coordinates(t_data, t_frame, t_coords)
+    for t_frame in matches_3d:
+        t_coords, s_coords = matches_3d[t_frame][0]
+        s_frame = matches_3d[t_frame][1]
 
-        s_matched, t_matched = generate_utils.remove_zero_rows(s_matched, t_matched)
-        s_matched_all.append(s_matched)
-        t_matched_all.append(t_matched)
+        s_matched_all.append(s_coords)
+        t_matched_all.append(t_coords)
+        
+        t_pcd_frame = align_utils.create_pcd_from_frame(t_data, t_frame, remove_outliers=True)
+        plot_file = os.path.join(output_path, f"{t_frame}_cleaned_pcd.png")
+        t_pcd_frame = t_pcd_frame.voxel_down_sample(voxel_size=0.008)
+        data_utils.plot_points_3d(t_pcd_frame, output_path=plot_file, highlight_pcd=t_matched)
+        matched_points_paths.append(plot_file)
 
-    if len(s_matched_all) == 0 or len(t_matched_all) == 0:
-        print(bcolors.WARNING + "No matched points found" + bcolors.ENDC)
-        return 1, np.eye(4)
+    path_names = np.array([matched_points_paths, plotted_points_paths])
+    try:
+        combined_array = data_utils.create_image_grid_from_paths(path_names)
+        cv2.imwrite(os.path.join(output_path, f"{object_name}_{state}_matched_points.png"), combined_array)
+        scatter_plot_table.add_data(object_name, wandb.Image(combined_array))
+    except:
+        combined = data_utils.combine_images_horizontally(matched_points_paths)
+        cv2.imwrite(os.path.join(output_path, f"{object_name}_{state}_matched_points.png"), combined)
+        scatter_plot_table.add_data(object_name, wandb.Image(combined))
 
-    s_matched = np.concatenate(s_matched_all, axis=0)
-    t_matched = np.concatenate(t_matched_all, axis=0)
+    return s_matched_all, t_matched_all
 
-    scale, T = generate_utils.find_p2p_transformation(s_matched, t_matched)
-
-    return scale, T
 
 def save_aligned_mesh(matched_info, output_path, object_name):
 
@@ -124,34 +153,75 @@ def save_aligned_mesh(matched_info, output_path, object_name):
     mesh = matched_info["mesh"]
     matches = matched_info["matches"]
 
-    scale, T = align_target_matched_points(s_data, t_data, matches)
+    rot_matrix = mesh.get_rotation_matrix_from_xyz((np.pi/2, 0, 0))
+    mesh.rotate(rot_matrix, center=(0, 0, 0))
 
-    s_pcd = o3d.geometry.PointCloud()
     t_pcd = o3d.geometry.PointCloud()
     for frame in matches:
-        s_pcd_frame = generate_utils.create_pcd_from_frame(s_data, matches[frame][1])
-        t_pcd_frame = generate_utils.create_pcd_from_frame(t_data, frame, remove_outliers=False)
-        s_pcd += s_pcd_frame
+        t_pcd_frame = align_utils.create_pcd_from_frame(t_data, frame, remove_outliers=True)
         t_pcd += t_pcd_frame
     
+    number_of_points_to_sample = 200000 
+    s_pcd = mesh.sample_points_uniformly(number_of_points=number_of_points_to_sample)
+
     o3d.io.write_point_cloud(os.path.join(output_path, f"{object_name}_ground_truth_pcd.ply"), t_pcd)
     o3d.io.write_point_cloud(os.path.join(output_path,f"{object_name}_s_pcd.ply"), s_pcd)
 
-    rot_matrix = mesh.get_rotation_matrix_from_xyz((np.pi/2, 0, 0))
-    mesh.rotate(rot_matrix, center=(0, 0, 0))
-    mesh.scale(scale, center=(0, 0, 0))
-    mesh.transform(T)
-    s_pcd.scale(scale, center=(0, 0, 0))
 
-    s_pcd.transform(T)
+    # s_matched, t_matched = align_target_matched_points(s_data, t_data, matches, output_path)
+    # best_R = np.eye(3)
+    # best_s = 1.0
+    # best_t = np.zeros(3)
+    # best_inlier_ratio = 0.0
+    
+    # for i, (s_match, t_match) in enumerate(zip(s_matched, t_matched)):
+    #     R, s, t, inlier_ratio = align_utils.find_best_transformation_ransac(s_match, t_match)
+    #     if inlier_ratio > best_inlier_ratio:
+    #             best_R = R
+    #             best_s = s
+    #             best_t = t
+    #             best_inlier_ratio = inlier_ratio
+
+    # if best_inlier_ratio > 0:
+    #     transformed_source = np.dot(s_matched, best_R.T) * best_s + best_t
+    #     vis_path = os.path.join(output_path, f"{object_name}_ransac_alignment.ply")
+        
+    #     source_pcd = o3d.geometry.PointCloud()
+    #     source_pcd.points = o3d.utility.Vector3dVector(transformed_source)
+    #     source_pcd.paint_uniform_color([1, 0, 0])  # Red for source
+        
+    #     target_pcd = o3d.geometry.PointCloud()
+    #     target_pcd.points = o3d.utility.Vector3dVector(t_matched)
+    #     target_pcd.paint_uniform_color([0, 1, 0])  # Green for target
+        
+    #     combined_pcd = source_pcd + target_pcd
+    #     o3d.io.write_point_cloud(vis_path, combined_pcd)
+
+
+        # transformation = find_best_transformation_with_voting(s_match, t_match, scale)
+
+
+    # scale, T = align_target_matched_points(s_data, t_data, matches, output_path)
+
+    # rot_matrix = mesh.get_rotation_matrix_from_xyz((np.pi/2, 0, 0))
+    # mesh.rotate(rot_matrix, center=(0, 0, 0))
+    # mesh.scale(scale, center=(0, 0, 0))
+    # mesh.transform(T)
+    # s_pcd.scale(scale, center=(0, 0, 0))
+
+    # s_pcd.transform(T)
 
     print("Finding ransac transformation")
-    T = generate_utils.find_ransac_transformation(s_pcd, t_pcd)
+    T = align_utils.find_ransac_transformation(s_pcd, t_pcd)
+    mesh.transform(T)
+    s_pcd.transform(T)
+
+    T = align_utils.find_ransac_transformation(s_pcd, t_pcd, voxel_size = 0.01, distance_threshold=0.025)
     mesh.transform(T)
     s_pcd.transform(T)
 
     # print("Finding ICP transformation")
-    # T = generate_utils.find_icp_transformation(s_pcd, t_pcd)
+    # T = align_utils.find_icp_transformation(s_pcd, t_pcd)
     # mesh.transform(T)
     # s_pcd.transform(T)
 
@@ -159,10 +229,11 @@ def save_aligned_mesh(matched_info, output_path, object_name):
     
     return mesh
 
-def log_wandb(combined_scene_pcd, mesh_paths, combined_mesh_glb_path, uniform_view_table, alignment_table):
+def log_wandb(combined_scene_pcd, mesh_paths, combined_mesh_glb_path, uniform_view_table, alignment_table, scatter_plot_table):
     wandb.log({"object_meshes": [wandb.Object3D(glb_path, scene={"bg_color": "#000000"}) for glb_path in mesh_paths.values()]})
     wandb.log({"generated_mesh_information": uniform_view_table})
     wandb.log({f"alignment_information": alignment_table})
+    wandb.log({"matching_point_clouds": scatter_plot_table})
 
     wandb.log({ "combined_scene_mesh": wandb.Object3D( combined_mesh_glb_path, scene={"bg_color": "#000000"})})
 
@@ -174,6 +245,8 @@ def log_wandb(combined_scene_pcd, mesh_paths, combined_mesh_glb_path, uniform_vi
 
 if __name__ == "__main__":
 
+    print("starting")
+
     parser = ArgumentParser("Get masks and mesh extracts of objects within a scene")
 
     parser.add_argument("--source_dir", "-s", required=True, type=str)
@@ -183,10 +256,10 @@ if __name__ == "__main__":
     parser.add_argument("--num_images", type=int, default=200)
     parser.add_argument("--select_frames", action="store_true", default=False)
     parser.add_argument("--sparse_path", type=str, default=None)
-    parser.add_argument("--resize", type=int, nargs='+', default=[192, 256])
+    parser.add_argument("--resize", type=int, nargs='+', default=[480, 640])
     parser.add_argument("--run_name", type=str, default=None)
-    parser.add_argument("--sparse_params", type=float, nargs='+', default=[12, 7.5])
-    parser.add_argument("--latent_params", type=int, nargs='+', default=[12, 3])
+    parser.add_argument("--sparse_params", type=float, nargs='+', default=[50, 7.5])
+    parser.add_argument("--latent_params", type=int, nargs='+', default=[50, 3])
 
     pipeline = get_pipeline()
     args = parser.parse_args() 
@@ -200,6 +273,7 @@ if __name__ == "__main__":
     wandb.init(project="object_generation_logging", name= os.path.basename(output_path) + time.strftime("%Y%m%d-%H%M%S"))
     uniform_view_table = wandb.Table(columns=["object_name", "multiview_images", "mesh_images"])
     alignment_table = wandb.Table(columns=["object_state", "alignment_images"])
+    scatter_plot_table = wandb.Table(columns=["object_name", "matched_points_visualization"])
     mesh_paths = {}
     combined_mesh = o3d.geometry.TriangleMesh()
     combined_scene_pcd = o3d.geometry.PointCloud()
@@ -224,9 +298,6 @@ if __name__ == "__main__":
             image = Image.open(os.path.join(generation_path, f"{frame_name}.{'jpg' if 'jpg' in os.listdir(generation_path)[0] else 'png'}"))
             images.append(image)
 
-        alignment_json_path = os.path.join(object_output_path, f"{object_name}_alignment.json")
-        alignment_json = {}
-
         if not args.skip_generation:
             sparse_params = {"steps": int(args.sparse_params[0]), "cfg_strength": args.sparse_params[1]}
             latent_params = {"steps": int(args.latent_params[0]), "cfg_strength": args.latent_params[1]}
@@ -234,11 +305,7 @@ if __name__ == "__main__":
         else: 
             print(bcolors.OKGREEN + f"Using existing mesh for {object_name}" + bcolors.ENDC)
 
-            mesh_data = generate_utils.prepare_existing_mesh_data(object_output_path, object_name, num_images)
-
-            if os.path.exists(alignment_json_path):
-                with open(alignment_json_path, "r") as f:
-                    alignment_json = json.load(f)
+            mesh_data = data_utils.prepare_existing_mesh_data(object_output_path, object_name, num_images)
 
         mesh_frames = []
         for frame in mesh_data["frames"]:
@@ -252,6 +319,14 @@ if __name__ == "__main__":
         mesh_path = os.path.join(object_output_path, f"{object_name}_mesh.obj")
         # texture_path = os.path.join(object_output_path, f"{object_name}_texture.png")
         mesh = o3d.io.read_triangle_mesh(mesh_path)
+
+        pickle_path = os.path.join(object_output_path, f"{object_name}_alignment.pkl")
+
+        alignment_states = {}
+        if args.skip_generation and os.path.exists(pickle_path):
+            with open(pickle_path, "rb") as f:
+                alignment_states = pickle.load(f)
+
         for state in sorted(os.listdir(os.path.join(source_dir, object_name)), key=lambda x: get_number(x)):
             
             if state == "generation_state":
@@ -261,9 +336,11 @@ if __name__ == "__main__":
             state_output_path = os.path.join(object_output_path, state)
 
             os.makedirs(state_output_path, exist_ok=True)
-            state_data = generate_utils.prepare_record3d_data(state_multiview_path, os.path.join(args.base_directory, "input_depth"), os.path.join(args.base_directory, "new_metadata.json"))
+            state_data = data_utils.prepare_record3d_data(state_multiview_path, os.path.join(args.base_directory, "input_depth"), os.path.join(args.base_directory, "new_metadata.json"))
 
             matched_info = {
+                "object_name": object_name,
+                "state": state,
                 "mesh_data": mesh_data,
                 "multiview_data": state_data,
                 "mesh": copy.deepcopy(mesh),
@@ -271,20 +348,20 @@ if __name__ == "__main__":
             }
             
             print(bcolors.OKCYAN + f"Finding {object_name} mesh alignment for {state}" + bcolors.ENDC)
-            alignment_images = []
+            alignment_images_paths = []
 
-            if args.skip_generation and os.path.exists(alignment_json_path):
+            if args.skip_generation and alignment_states.get(state):
                 print(bcolors.OKGREEN + f"Using existing alignment for {object_name}, {state}" + bcolors.ENDC)
 
-                for state_frame in alignment_json[state]:
-                    matched_points = alignment_json[state][state_frame][0]
-                    matched_frame = alignment_json[state][state_frame][1]
+                for state_frame in alignment_states[state]:
+                    matched_points = alignment_states[state][state_frame][0]
+                    matched_frame = alignment_states[state][state_frame][1]
 
-                    alignment_image_path = os.path.join(state_output_path, f"{state_frame}_alignment.png")
+                    alignment_image_path = os.path.join(state_output_path, f"{state_frame}_target_matched.png")
                     if os.path.exists(alignment_image_path):
-                        alignment_images.append(wandb.Image(cv2.imread(alignment_image_path)))
+                        alignment_images_paths.append(alignment_image_path)
                     
-                    print(state, state_frame, matched_frame, len(matched_points[0]))
+                    print(f"{state}, {state_frame}, {matched_frame}, {len(matched_points[0])} points")
                     if len(matched_points[0])  < 3:
                         continue
 
@@ -293,24 +370,37 @@ if __name__ == "__main__":
             else:
                 for state_frame in state_data["frames"]:
                     state_target = state_data["frames"][state_frame][0]
+                    original_h, original_w = state_target.shape[:2]
+
+                    state_target = cv2.resize(state_target, (args.resize[0], args.resize[1]))
+                    crop_img, bbox = data_utils.crop_image(state_target)
+
                     mesh_images = [mesh_data["frames"][frame][0] for frame in mesh_data["frames"]]
 
                     target_matched_path = os.path.join(state_output_path, f"{state_frame}_target_matched.png")
-                    matched_points, matched_frame, alignment_image = target_matching(state_target, mesh_images, args.resize, target_matched_path, max_matches=9)
-                    if alignment_image is not None:
-                        alignment_image = cv2.cvtColor(alignment_image, cv2.COLOR_RGB2BGR) 
-                        alignment_images.append(wandb.Image(alignment_image))
+                    matched_points, matched_frame, alignment_image = target_matching(crop_img, mesh_images, -1, target_matched_path)
 
-                    print(state, state_frame, matched_frame, len(matched_points[0]))
+                    matched_points = np.array(matched_points)
+                    matched_points[0] += np.array([bbox[0], bbox[1]])
+                    scale_x = original_w / args.resize[0]
+                    scale_y = original_h / args.resize[1]
+                    matched_points[0] = matched_points[0] * np.array([scale_x, scale_y])
+
+                    alignment_image_path = os.path.join(state_output_path, f"{state_frame}_target_matched.png")
+                    if os.path.exists(alignment_image_path):
+                        alignment_images_paths.append(alignment_image_path)
+
+                    print(f"{state}, {state_frame}, {matched_frame}, {len(matched_points[0])} points")
                     if len(matched_points[0])  < 3:
                         continue
                     matched_info["matches"][state_frame] = [matched_points, matched_frame]
-                alignment_json[state] = matched_info["matches"]
+                alignment_states[state] = matched_info["matches"]
+
+            with open(pickle_path, "wb") as f:
+                pickle.dump(alignment_states, f)
 
 
-            with open(alignment_json_path, "w") as f:
-                json.dump(alignment_json, f)
-            alignment_table.add_data(f"{object_name}_{state}", alignment_images)
+            # alignment_table.add_data(f"{object_name}_{state}", wandb.Image(data_utils.combine_images_horizontally(alignment_images_paths, shift_color=True)))
             aligned_mesh = save_aligned_mesh(matched_info, state_output_path, f"{object_name}_{state}")
 
             if state == "state_1":
@@ -326,5 +416,7 @@ if __name__ == "__main__":
     o3d.io.write_point_cloud(os.path.join(output_path, f"{os.path.basename(args.base_directory)}_combined_scene_pcd.ply"), combined_scene_pcd)
     o3d.io.write_triangle_mesh(os.path.join(output_path, f"{os.path.basename(args.base_directory)}_combined_scene_mesh.obj"), combined_mesh)
 
-    log_wandb(combined_scene_pcd, mesh_paths, os.path.join(output_path, f"{os.path.basename(args.base_directory)}_combined_scene_mesh.obj"), uniform_view_table, alignment_table)
+    log_wandb(combined_scene_pcd, mesh_paths, os.path.join(output_path, f"{os.path.basename(args.base_directory)}_combined_scene_mesh.obj"), uniform_view_table, alignment_table, scatter_plot_table)
     wandb.finish()        
+
+# python generate.py -b /store/real/ehliang/data/basement_kitchen/kitchen_interaction_3 -s /store/real/ehliang/multiview_data/kitchen_static_3/10_img -o /home/ehliang/real2code2real/outputs/quick_test --skip_generation

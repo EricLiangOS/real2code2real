@@ -15,10 +15,10 @@ import Imath
 import json
 import cv2
 from scipy.spatial.transform import Rotation
-import math
-
 from submodules.TRELLIS.trellis.utils import render_utils, postprocessing_utils
 from submodules.TRELLIS.trellis.renderers import MeshRenderer, GaussianRenderer
+import math
+
 
 def get_number(word):
     numbers = ""
@@ -38,18 +38,6 @@ def convert_to_rgba(image):
     black_pixels = np.all(image[:, :, :3] == [0, 0, 0], axis=-1)
 
     return rgba_image 
-
-def remove_zero_rows(arr1, arr2):
-    mask1 = ~np.all(arr1 == 0, axis=1)
-    mask2 = ~np.all(arr2 == 0, axis=1)
-    mask = mask1 & mask2
-    return arr1[mask], arr2[mask]
-
-def combine_transformations(transform_list):
-    result = np.eye(4)
-    for transform in transform_list:
-        result = result @ transform
-    return result
 
 def save_object(object_output, output_path, object_name="", is_glb=False):
     if object_name:
@@ -77,8 +65,7 @@ def save_object(object_output, output_path, object_name="", is_glb=False):
 
     obj.export(mesh_path)
 
-
-def get_extrinsics_intrinsics(num_frames=200, r=2.7, fov=40):
+def get_extrinsics_intrinsics(num_frames=200, r=1.5, fov=40):
     yaws = []
     pitches = []
 
@@ -101,17 +88,13 @@ def get_extrinsics_intrinsics(num_frames=200, r=2.7, fov=40):
 
 def read_exr_depth(exr_path):
     exr_file = OpenEXR.InputFile(exr_path)
-    
-    data_window = exr_file.header()['dataWindow']
-    width = data_window.max.x - data_window.min.x + 1
-    height = data_window.max.y - data_window.min.y + 1
-    
-    depth_str = exr_file.channels(['R'], Imath.PixelType(Imath.PixelType.FLOAT))[0]
-    
-    # Convert depth data to numpy array
-    depth = np.frombuffer(depth_str, dtype=np.float32)
+    dw = exr_file.header()['dataWindow']
+    width = dw.max.x - dw.min.x + 1
+    height = dw.max.y - dw.min.y + 1
+    pt = Imath.PixelType(Imath.PixelType.HALF)
+    depth_str = exr_file.channel("R", pt)
+    depth = np.frombuffer(depth_str, dtype=np.float16).astype(np.float32)
     depth = depth.reshape((height, width))
-    
     return depth
 
 def get_rgb_frames(output, num_frames, resolution=512, bg_color=(0, 0, 0), colors_overwrite=None):
@@ -224,6 +207,42 @@ def resize_depth_frames(frames, height, width, output_dir=None):
 
     return padded_depths
 
+def crop_image(img):
+    mask_img = img[:, :, 3]
+    raw_img = img[:, :, :3]       
+
+    bbox = np.argwhere(mask_img > 0.8 * 255)
+    bbox = (
+        np.min(bbox[:, 1]),
+        np.min(bbox[:, 0]),
+        np.max(bbox[:, 1]),
+        np.max(bbox[:, 0]),
+    )
+    center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+    size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
+    size = int(size * 1.2)
+    bbox = (
+        int(center[0] - size // 2),
+        int(center[1] - size // 2),
+        int(center[0] + size // 2),
+        int(center[1] + size // 2),
+    )
+    # Make sure the bounding box is within the image
+    bbox = (
+        max(0, bbox[0]),
+        max(0, bbox[1]),
+        min(raw_img.shape[1], bbox[2]),
+        min(raw_img.shape[0], bbox[3]),
+    )
+    # Get the masked cropped image used for superglue
+    crop_img = raw_img.copy()
+    mask_bool = mask_img > 0
+    crop_img[~mask_bool] = 0
+    crop_img = crop_img[bbox[1] : bbox[3], bbox[0] : bbox[2]]
+
+    return crop_img, bbox
+
+
 def prepare_existing_mesh_data(output_path, object_name, generated_images):
     rgb_path = os.path.join(output_path, f"{object_name}_rgb")
     depth_path = os.path.join(output_path, f"{object_name}_depth")
@@ -310,6 +329,8 @@ def prepare_mesh_data(output, H, W, generated_images=300, output_path = None, ob
     for i in range(generated_images):
         depth_frames[i][depth_frames[i] < 1.5] = 0
         data["frames"][i] = [rgb_frames[i], depth_frames[i], extrinsics_tensor[i].detach().cpu().numpy()]
+
+
 
     return data
 
@@ -425,199 +446,141 @@ def prepare_record3d_data(images_dir, depth_dir, metadata_path):
 
     return output
 
-def create_pcd_from_frame(data, frame_index, samples=5000, remove_outliers=True):
+def combine_images_horizontally(image_paths, shift_color):
+    # Read all images
+    images = [cv2.imread(img_path) for img_path in image_paths]
+    images = [img for img in images if img is not None]
 
-    intrinsics = data["intrinsics"]
-    frame = data["frames"][frame_index]
+    if shift_color:
+        images = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for img in images]
+
+    if not images:
+        raise ValueError("No valid images found in the provided paths")
     
-    mask_img = frame[0]
-    depth_img = frame[1].copy()
-    extrinsics = frame[2]
+    heights = [img.shape[0] for img in images]
+    width_sum = sum(img.shape[1] for img in images)
+    max_height = max(heights)
+    
+    result = np.zeros((max_height, width_sum, 3), dtype=np.uint8)
+    
+    current_x = 0
+    for img in images:
+        h, w = img.shape[:2]
 
-    if mask_img.shape[2] == 4:
-        alpha_mask = mask_img[:, :, 3] > 0
+        result[0:h, current_x:current_x+w] = img
+        current_x += w
+    
+    return result
+
+def plot_points_on_image(image, coordinates, output_path, radius=3, color=(0, 0, 255), thickness=2):
+    marked_image = image.copy()
+    marked_image = cv2.cvtColor(marked_image, cv2.COLOR_BGR2RGB)
+
+    if isinstance(coordinates, tuple) and len(coordinates) == 2:
+        xs, ys = coordinates
+        coordinates = list(zip(xs, ys))
+    
+    # Draw circles at each point
+    for x, y in coordinates:
+        x, y = int(x), int(y)
+        cv2.circle(marked_image, (x, y), radius, color, thickness)
+    
+    # Save the image
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    cv2.imwrite(output_path, marked_image)
+    
+    return marked_image
+
+def create_image_grid_from_paths(image_paths_array):
+
+    if not isinstance(image_paths_array, np.ndarray) or image_paths_array.ndim != 2:
+        raise ValueError("Input must be a 2D numpy array of image paths")
+    
+    rows, cols = image_paths_array.shape
+    
+    images = np.empty(image_paths_array.shape, dtype=object)
+    row_heights = np.zeros(rows, dtype=int)
+    col_widths = np.zeros(cols, dtype=int)
+    
+    for i in range(rows):
+        for j in range(cols):
+            if image_paths_array[i, j]:
+                img = cv2.imread(image_paths_array[i, j])
+                if img is not None:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    images[i, j] = img
+                    h, w = img.shape[:2]
+                    row_heights[i] = max(row_heights[i], h)
+                    col_widths[j] = max(col_widths[j], w)
+    
+    grid_height = np.sum(row_heights)
+    grid_width = np.sum(col_widths)
+    grid = np.ones((grid_height, grid_width, 3), dtype=np.uint8) * 255  # White background
+    
+    y_offset = 0
+    for i in range(rows):
+        x_offset = 0
+        for j in range(cols):
+            if images[i, j] is not None:
+                img = images[i, j]
+                h, w = img.shape[:2]
+                
+                # Center the image in its cell
+                y_pad_top = (row_heights[i] - h) // 2
+                x_pad_left = (col_widths[j] - w) // 2
+                
+                grid[y_offset + y_pad_top:y_offset + y_pad_top + h, 
+                     x_offset + x_pad_left:x_offset + x_pad_left + w] = img
+            
+            x_offset += col_widths[j]
+        y_offset += row_heights[i]
+    
+    return grid
+
+# pcd is an open3d pointcloud, highlight_pcd is a numpy array of points to highlight
+def plot_points_3d(pcd, output_path=None, point_size=0.05, fig_size=(10, 10), highlight_pcd=None):
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+    
+    points = np.asarray(pcd.points)
+    colors = np.asarray(pcd.colors) if pcd.has_colors() else np.ones((len(points), 3)) * 0.5
+    
+    fig = plt.figure(figsize=fig_size)
+    ax = fig.add_subplot(111, projection='3d')
+    
+    # Swap x and y coordinates to show y-axis in front
+    ax.scatter(
+        points[:, 1], points[:, 0], points[:, 2],  # Swapped x and y
+        c=colors,
+        s=point_size,
+        marker='.'
+    )
+    
+    if highlight_pcd is not None:
+        highlight_points = np.asarray(highlight_pcd)
+        # Also swap x and y for highlighted points
+        ax.scatter(
+            highlight_points[:, 1], highlight_points[:, 0], highlight_points[:, 2],  # Swapped x and y
+            c='magenta',
+            s=10,
+            marker='.',
+            alpha=1.0
+        )
+    
+    # Update axis labels to reflect the swap
+    ax.set_xlabel('Y (front)')  # This was x
+    ax.set_ylabel('X')          # This was y
+    ax.set_zlabel('Z')
+    
+    # Adjust view to better show the now-front y-axis
+    ax.view_init(elev=20, azim=0)  # Different view angle to highlight front y-axis
+    
+    # Keep the rest of the function the same
+    ax.set_box_aspect([1.0, 1.0, 1.0])
+    
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
     else:
-        alpha_mask = np.ones(mask_img.shape[:2], dtype=bool)        
-
-    alpha_indices = np.argwhere(alpha_mask)
-
-    sampled_indices = alpha_indices[np.random.choice(alpha_indices.shape[0], samples, replace=False)]
-    alpha_mask[sampled_indices[:, 0], sampled_indices[:, 1]] = True
-
-    depth_img[~alpha_mask] = 0
-
-    rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-        o3d.geometry.Image(mask_img[:, :, :3].astype(np.uint8)),
-        o3d.geometry.Image(depth_img),
-        depth_scale=1.0,
-        depth_trunc=1000.0,
-        convert_rgb_to_intensity=False
-    )
-
-    pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
-        rgbd_image, intrinsics, extrinsics
-    )
-
-    pcd = pcd.voxel_down_sample(voxel_size=0.005)
-    pcd = pcd.remove_duplicated_points()
-    
-    if remove_outliers:
-        cl, ind = pcd.remove_statistical_outlier(nb_neighbors=10, std_ratio=0.5)
-        pcd = pcd.select_by_index(ind)
-    
-    return pcd
-
-
-def create_points_from_coordinates(data, frame_index, points):
-    intrinsics = data["intrinsics"]
-    frame = data["frames"][frame_index]
-    
-    mask_img = frame[0]
-    extrinsics = frame[2]
-
-    projected_points = []
-
-    for x, y in points:
-        alpha_mask = np.zeros(mask_img.shape[:2], dtype=bool)
-        alpha_mask[y, x] = True
-        
-        depth_img = frame[1].copy()
-        depth_img[~alpha_mask] = 0
-
-        rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            o3d.geometry.Image(mask_img[:, :, :3].astype(np.uint8)),
-            o3d.geometry.Image(depth_img),
-            depth_scale=1.0,
-            depth_trunc=1000.0,
-            convert_rgb_to_intensity=False
-        )
-
-        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
-            rgbd_image, intrinsics, extrinsics
-        )
-
-        pcd = pcd.remove_duplicated_points()
-
-        if (len(pcd.points) > 0):
-            projected_points.append(pcd.points[0])
-        else:
-            projected_points.append([0, 0, 0])
-
-    projected_points = np.asarray(projected_points)
-
-    return projected_points
-
-def find_p2p_transformation(source_points, target_points):
-
-    scales = []
-    for i in range(len(source_points)):
-        for j in range(i + 1, len(source_points)):
-            dist1 = np.linalg.norm(source_points[i] - source_points[j])
-            dist2 = np.linalg.norm(target_points[i] - target_points[j])
-            if dist1 > 1e-10 and dist2 > 1e-10:
-                scales.append(dist2 / dist1)
-    avg_scale = np.mean(scales) if scales else 1.0
-
-    source_points = source_points * avg_scale
-    N = source_points.shape[0]
-
-    source_mean = np.mean(source_points, axis=0)
-    target_mean = np.mean(target_points, axis=0)
-    source_centered = source_points - source_mean
-    target_centered = target_points - target_mean
-
-    denominator = np.linalg.norm(source_centered)
-    if denominator < 1e-10:
-        scale = 1.0
-    else:
-        scale = np.linalg.norm(target_centered) / denominator
-
-    H = np.dot(source_centered.T, target_centered)
-    U, _, Vt = np.linalg.svd(H)
-    rotation_matrix = np.dot(Vt.T, U.T)
-
-    if np.linalg.det(rotation_matrix) < 0:
-        Vt[2, :] *= -1
-        rotation_matrix = np.dot(Vt.T, U.T)
-
-    translation = target_mean - scale * np.dot(rotation_matrix, source_mean)
-
-    transformation_matrix = np.eye(4)
-    transformation_matrix[:3, :3] = scale * rotation_matrix
-    transformation_matrix[:3, 3] = translation
-
-    return avg_scale, transformation_matrix
-
-def compute_scaling_factor(source, target):
-    source_centroid = np.mean(np.asarray(source.points), axis=0)
-    target_centroid = np.mean(np.asarray(target.points), axis=0)
-    source_dists = np.linalg.norm(np.asarray(source.points) - source_centroid, axis=1)
-    target_dists = np.linalg.norm(np.asarray(target.points) - target_centroid, axis=1)
-    scale = np.mean(target_dists) / np.mean(source_dists)
-    return scale
-
-def preprocess_point_cloud(pcd, voxel_size):
-    pcd_down = pcd.voxel_down_sample(voxel_size)
-    radius_normal = voxel_size * 2
-    pcd_down.estimate_normals(
-        o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30)
-    )
-    radius_feature = voxel_size * 5
-    fpfh = o3d.pipelines.registration.compute_fpfh_feature(
-        pcd_down,
-        o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
-    )
-    return pcd_down, fpfh
-
-def find_ransac_transformation(source_pcd, target_pcd, voxel_size=0.05, distance_threshold=0.1):
-    scale = compute_scaling_factor(source_pcd, target_pcd)
-    
-    scaled_source = copy.deepcopy(source_pcd)
-    scaled_points = np.asarray(scaled_source.points) * scale
-    scaled_source.points = o3d.utility.Vector3dVector(scaled_points)
-    
-    source_down, source_fpfh = preprocess_point_cloud(scaled_source, voxel_size)
-    target_down, target_fpfh = preprocess_point_cloud(target_pcd, voxel_size)
-
-    result = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
-        source_down,
-        target_down,
-        source_fpfh,
-        target_fpfh,
-        True,
-        distance_threshold,
-        estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
-        ransac_n=3,
-        checkers=[
-            o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
-            o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(distance_threshold)
-        ],
-        criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(4000000, 1.0)
-    )
-    S = np.eye(4)
-    S[:3, :3] *= scale
-    final_transformation = result.transformation @ S
-    return final_transformation
-
-def find_icp_transformation(source_pcd, target_pcd, threshold=0.05, init_transformation=np.eye(4)):
-    source_down = source_pcd.voxel_down_sample(voxel_size=threshold)
-    target_down = target_pcd.voxel_down_sample(voxel_size=threshold)
-
-    source_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=threshold * 2, max_nn=30))
-    source_down.orient_normals_consistent_tangent_plane(30)
-    target_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=threshold * 2, max_nn=30))
-    target_down.orient_normals_consistent_tangent_plane(30)
-
-    result_icp = o3d.pipelines.registration.registration_icp(
-        source_down, 
-        target_down, 
-        threshold, 
-        init_transformation,
-        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-        o3d.pipelines.registration.ICPConvergenceCriteria(
-            relative_fitness=1e-7, 
-            relative_rmse=1e-7, 
-            max_iteration=2000
-        )
-    )
-    return result_icp.transformation
+        plt.tight_layout()
+        plt.show()
